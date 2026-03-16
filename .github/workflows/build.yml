@@ -23,6 +23,11 @@ jobs:
           sudo dpkg -i "pandoc-${PANDOC_VERSION}-1-amd64.deb"
 
       - name: build
+        env:
+          SITE_TITLE: Blog
+          SITE_URL: https://dysksh.github.io
+          SITE_LANG: ja
+          SITE_DESCRIPTION: ソフトウェアエンジニアリングに関する技術ブログ
         run: python scripts/build.py
 
       - name: deploy
