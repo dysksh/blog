@@ -7,12 +7,65 @@
 <link rel="canonical" href="/about/">
 <link rel="stylesheet" href="/style.css">
 <link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" integrity="sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A" crossorigin="anonymous">
 </head>
 <body>
 <nav><a href="/">home</a> <a href="/posts/">posts</a> <a href="/tags/">tags</a> <a href="/search/">search</a> <a href="/about/">about</a></nav>
 <main>
 <h1>About</h1>
-<p>Coming soon.</p>
+<h2 id="このブログについて">このブログについて</h2>
+<p>ソフトウェアエンジニアリングに関する技術ブログです。日々の開発で得た知見やTipsを記録しています。</p>
+<h2 id="技術スタック">技術スタック</h2>
+<p>このブログは以下の技術で構築されています:</p>
+<ul>
+<li><strong>記事</strong>: Markdown (YAML front matter)</li>
+<li><strong>ビルド</strong>: Python + Pandoc</li>
+<li><strong>ホスティング</strong>: GitHub Pages</li>
+<li><strong>コードハイライト</strong>: Prism.js</li>
+<li><strong>図表</strong>: Mermaid</li>
+<li><strong>検索</strong>: Fuse.js (クライアントサイド全文検索)</li>
+</ul>
+<h2 id="ソースコード">ソースコード</h2>
+<p>このブログのソースコードは <a
+href="https://github.com/dysksh/blog">GitHub</a> で公開しています。</p>
+
 </main>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"
+  integrity="sha384-ZM8fDxYm+GXOWeJcxDetoRImNnEAS7XwVFH5kv0pT6RXNy92Nemw/Sj7NfciXpqg"
+  crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js"
+  integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q"
+  crossorigin="anonymous"></script>
+<script>
+document.querySelectorAll('pre[class] > code').forEach(function(code) {
+  var pre = code.parentElement;
+  var lang = pre.className;
+  if (!lang) return;
+  if (lang === 'mermaid') {
+    pre.textContent = code.textContent;
+    pre.className = 'mermaid';
+    return;
+  }
+  code.className = 'language-' + lang;
+  pre.className = '';
+  Prism.highlightElement(code);
+});
+document.querySelectorAll('pre > code[class*="language-"]').forEach(function(code) {
+  var pre = code.parentElement;
+  var btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.textContent = 'copy';
+  btn.addEventListener('click', function() {
+    navigator.clipboard.writeText(code.textContent);
+    btn.textContent = 'copied!';
+    setTimeout(function() { btn.textContent = 'copy'; }, 2000);
+  });
+  pre.appendChild(btn);
+});
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
+  integrity="sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I"
+  crossorigin="anonymous"></script>
+<script>mermaid.initialize({ startOnLoad: true });</script>
 </body>
 </html>

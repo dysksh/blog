@@ -31,6 +31,7 @@ nav a:hover { color: #000; }
 a { color: #0066cc; }
 
 h1 { margin-bottom: 0.5rem; }
+.site-description { color: #666; font-size: 1.05rem; margin-bottom: 1.5rem; }
 h2, h3 { margin-top: 1.5rem; margin-bottom: 0.5rem; }
 
 p, ul, ol, blockquote, table, pre, .mermaid { margin: 1rem 0; }
