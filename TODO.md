@@ -2,30 +2,30 @@
 
 ## Phase 1: Foundation
 
-- [ ] Create directory structure (`posts/`, `templates/`, `scripts/`)
-- [ ] Create HTML template (`templates/post.html`)
-  - [ ] Pandoc template variables ($title$, $body$)
-  - [ ] Canonical URL
-  - [ ] Prism.js
-  - [ ] Mermaid CDN
-  - [ ] Copy button JS
-  - [ ] Navigation
-- [ ] Create CSS (`style.css`)
-- [ ] Create build script (`scripts/build.py`)
-  - [ ] Front matter parsing
-  - [ ] Article HTML generation via Pandoc
-  - [ ] Article index page (date desc)
-  - [ ] Tag pages
-  - [ ] search-index.json
-  - [ ] rss.xml
-- [ ] GitHub Actions config (`.github/workflows/build.yml`)
-- [ ] Verify with sample article
+- [x] Create directory structure (`posts/`, `templates/`, `scripts/`)
+- [x] Create HTML template (inline in `build.py`)
+  - [x] Canonical URL
+  - [x] Prism.js
+  - [x] Mermaid CDN
+  - [x] Copy button JS
+  - [x] Navigation
+- [x] Create CSS (`style.css`)
+- [x] Create build script (`scripts/build.py`)
+  - [x] Front matter parsing
+  - [x] Article HTML generation via Pandoc
+  - [x] Article index page (date desc)
+  - [x] Tag pages
+  - [x] search-index.json
+  - [x] rss.xml
+- [x] GitHub Actions config (`.github/workflows/build.yml`)
+- [x] Verify with sample article
 
 ## Phase 2: Content
 
-- [ ] Top page (profile + recent posts + tags)
-- [ ] About page
-- [ ] Search page (Fuse.js)
+- [x] Top page (profile + recent posts + tags)
+- [x] About page (`pages/about.md`)
+- [x] Search page (Fuse.js)
+- [x] Sample articles (hello-world, markdown-guide)
 
 ## Phase 3: Image Infrastructure (optional)
 

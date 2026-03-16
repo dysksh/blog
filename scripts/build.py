@@ -20,6 +20,10 @@ PUBLIC_DIR = ROOT / "public"
 SITE_TITLE = os.environ.get("SITE_TITLE", "Blog")
 SITE_URL = os.environ.get("SITE_URL", "")
 SITE_LANG = os.environ.get("SITE_LANG", "ja")
+SITE_DESCRIPTION = os.environ.get(
+    "SITE_DESCRIPTION", "ソフトウェアエンジニアリングに関する技術ブログ"
+)
+PAGES_DIR = ROOT / "pages"
 
 INDEX_MAX_POSTS = 10
 RSS_MAX_POSTS = 20
@@ -233,7 +237,7 @@ def build_post(post):
 
 
 def build_index(posts):
-    """Generate top page."""
+    """Generate top page with profile, recent posts, and tags."""
     items = "\n".join(
         f'<li><time>{escape(p.get("date", ""))}</time>'
         f' <a href="{p["url"]}">{escape(p.get("title", ""))}</a></li>'
@@ -248,10 +252,16 @@ def build_index(posts):
         for t, c in sorted(tags.items())
     )
     content = f"<h1>{escape(SITE_TITLE)}</h1>\n"
+    content += f'<p class="site-description">{escape(SITE_DESCRIPTION)}</p>\n'
     content += f'<h2>Recent Posts</h2>\n<ul class="post-list">\n{items}\n</ul>\n'
+    if len(posts) > INDEX_MAX_POSTS:
+        content += '<p><a href="/posts/">View all posts &rarr;</a></p>\n'
     if tag_links:
         content += f'<h2>Tags</h2>\n<div class="tag-list">{tag_links}</div>\n'
-    write_file(PUBLIC_DIR / "index.html", page_html(SITE_TITLE, content, "/"))
+    write_file(
+        PUBLIC_DIR / "index.html",
+        page_html(SITE_TITLE, content, "/", description=SITE_DESCRIPTION),
+    )
 
 
 def build_posts_index(posts):
@@ -303,11 +313,32 @@ def build_tag_pages(posts):
 
 
 def build_about_page():
-    """Generate /about/ page."""
-    content = "<h1>About</h1>\n<p>Coming soon.</p>"
+    """Generate /about/ page from pages/about.md or fallback."""
+    about_md = PAGES_DIR / "about.md"
+    if about_md.exists():
+        text = about_md.read_text(encoding="utf-8")
+        meta, body = parse_front_matter(text)
+        title = meta.get("title", "About")
+        result = subprocess.run(
+            ["pandoc", "--no-highlight", "-t", "html"],
+            input=body,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        content = f"<h1>{escape(title)}</h1>\n{result.stdout}"
+    else:
+        title = "About"
+        content = "<h1>About</h1>\n<p>Coming soon.</p>"
     write_file(
         PUBLIC_DIR / "about" / "index.html",
-        page_html("About", content, "/about/"),
+        page_html(
+            title,
+            content,
+            "/about/",
+            extra_head=PRISM_HEAD,
+            extra_scripts=PRISM_MERMAID_SCRIPTS,
+        ),
     )
 
 
@@ -378,7 +409,7 @@ def build_rss(posts):
     channel = SubElement(rss, "channel")
     SubElement(channel, "title").text = SITE_TITLE
     SubElement(channel, "link").text = SITE_URL
-    SubElement(channel, "description").text = f"{SITE_TITLE} RSS Feed"
+    SubElement(channel, "description").text = SITE_DESCRIPTION
     for p in posts[:RSS_MAX_POSTS]:
         date_str = p.get("date", "")
         if not date_str:
