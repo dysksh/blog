@@ -18,15 +18,14 @@ TEMPLATES_DIR = ROOT / "templates"
 PUBLIC_DIR = ROOT / "public"
 
 SITE_TITLE = os.environ.get("SITE_TITLE", "Blog")
-# TODO: カスタムドメイン設定後、SITE_URLをカスタムドメインに変更する
-# GitHub Pagesのプロジェクトサイト(/blog/)ではルート絶対パスが404になるため、
-# カスタムドメイン設定までデプロイ後のリンクが正しく動作しない
 SITE_URL = os.environ.get("SITE_URL", "")
 SITE_LANG = os.environ.get("SITE_LANG", "ja")
 SITE_DESCRIPTION = os.environ.get(
     "SITE_DESCRIPTION", "ソフトウェアエンジニアリングに関する技術ブログ"
 )
 PAGES_DIR = ROOT / "pages"
+# TODO: カスタムドメイン設定後はBASE_PATHを空にできる
+BASE_PATH = os.environ.get("BASE_PATH", "")  # e.g. "/blog" for project sites
 
 INDEX_MAX_POSTS = 10
 RSS_MAX_POSTS = 20
@@ -34,13 +33,14 @@ SEARCH_MAX_RESULTS = 20
 SEARCH_THRESHOLD = 0.3
 SEARCH_CONTENT_LIMIT = 5000
 
-NAV_ITEMS = [
-    ("home", "/"),
-    ("posts", "/posts/"),
-    ("tags", "/tags/"),
-    ("search", "/search/"),
-    ("about", "/about/"),
-]
+def _nav_items():
+    return [
+        ("home", f"{BASE_PATH}/"),
+        ("posts", f"{BASE_PATH}/posts/"),
+        ("tags", f"{BASE_PATH}/tags/"),
+        ("search", f"{BASE_PATH}/search/"),
+        ("about", f"{BASE_PATH}/about/"),
+    ]
 
 PRISM_HEAD = (
     '<link rel="stylesheet"'
@@ -134,7 +134,7 @@ def load_posts():
         text = index_md.read_text(encoding="utf-8")
         meta, body = parse_front_matter(text)
         meta["slug"] = post_dir.name
-        meta["url"] = f"/posts/{post_dir.name}/"
+        meta["url"] = f"{BASE_PATH}/posts/{post_dir.name}/"
         meta["source"] = str(index_md)
         meta["body"] = body
         posts.append(meta)
@@ -146,7 +146,7 @@ def load_posts():
 
 
 def _nav_html():
-    return " ".join(f'<a href="{href}">{label}</a>' for label, href in NAV_ITEMS)
+    return " ".join(f'<a href="{href}">{label}</a>' for label, href in _nav_items())
 
 
 def page_html(title, content, path="/", description="", extra_head="", extra_scripts=""):
@@ -164,8 +164,8 @@ def page_html(title, content, path="/", description="", extra_head="", extra_scr
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)}</title>{desc_tag}
 <link rel="canonical" href="{canonical}">
-<link rel="stylesheet" href="/style.css">
-<link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">{head_extra}
+<link rel="stylesheet" href="{BASE_PATH}/style.css">
+<link rel="alternate" type="application/rss+xml" title="RSS" href="{BASE_PATH}/rss.xml">{head_extra}
 </head>
 <body>
 <nav>{_nav_html()}</nav>
@@ -204,7 +204,7 @@ def build_post(post):
         )
     if post.get("tags"):
         tag_links = " ".join(
-            f'<a href="/tags/{escape(t)}/">{escape(t)}</a>' for t in post["tags"]
+            f'<a href="{BASE_PATH}/tags/{escape(t)}/">{escape(t)}</a>' for t in post["tags"]
         )
         header_parts.append(f'<div class="tags">{tag_links}</div>')
 
@@ -251,19 +251,19 @@ def build_index(posts):
         for t in p.get("tags", []):
             tags[t] = tags.get(t, 0) + 1
     tag_links = " ".join(
-        f'<a href="/tags/{escape(t)}/">{escape(t)} ({c})</a>'
+        f'<a href="{BASE_PATH}/tags/{escape(t)}/">{escape(t)} ({c})</a>'
         for t, c in sorted(tags.items())
     )
     content = f"<h1>{escape(SITE_TITLE)}</h1>\n"
     content += f'<p class="site-description">{escape(SITE_DESCRIPTION)}</p>\n'
     content += f'<h2>Recent Posts</h2>\n<ul class="post-list">\n{items}\n</ul>\n'
     if len(posts) > INDEX_MAX_POSTS:
-        content += '<p><a href="/posts/">View all posts &rarr;</a></p>\n'
+        content += f'<p><a href="{BASE_PATH}/posts/">View all posts &rarr;</a></p>\n'
     if tag_links:
         content += f'<h2>Tags</h2>\n<div class="tag-list">{tag_links}</div>\n'
     write_file(
         PUBLIC_DIR / "index.html",
-        page_html(SITE_TITLE, content, "/", description=SITE_DESCRIPTION),
+        page_html(SITE_TITLE, content, f"{BASE_PATH}/", description=SITE_DESCRIPTION),
     )
 
 
@@ -277,7 +277,7 @@ def build_posts_index(posts):
     content = f'<h1>All Posts</h1>\n<ul class="post-list">\n{items}\n</ul>'
     write_file(
         PUBLIC_DIR / "posts" / "index.html",
-        page_html("All Posts", content, "/posts/"),
+        page_html("All Posts", content, f"{BASE_PATH}/posts/"),
     )
 
 
@@ -288,7 +288,7 @@ def build_tag_pages(posts):
         for t in p.get("tags", []):
             tags.setdefault(t, []).append(p)
     tag_links = " ".join(
-        f'<a href="/tags/{escape(t)}/">{escape(t)} ({len(ps)})</a>'
+        f'<a href="{BASE_PATH}/tags/{escape(t)}/">{escape(t)} ({len(ps)})</a>'
         for t, ps in sorted(tags.items())
     )
     write_file(
@@ -296,7 +296,7 @@ def build_tag_pages(posts):
         page_html(
             "Tags",
             f'<h1>Tags</h1>\n<div class="tag-list">{tag_links}</div>',
-            "/tags/",
+            f"{BASE_PATH}/tags/",
         ),
     )
     for tag, tag_posts in tags.items():
@@ -310,7 +310,7 @@ def build_tag_pages(posts):
             page_html(
                 f"Tag: {tag}",
                 f'<h1>Tag: {escape(tag)}</h1>\n<ul class="post-list">\n{items}\n</ul>',
-                f"/tags/{tag}/",
+                f"{BASE_PATH}/tags/{tag}/",
             ),
         )
 
@@ -338,7 +338,7 @@ def build_about_page():
         page_html(
             title,
             content,
-            "/about/",
+            f"{BASE_PATH}/about/",
             extra_head=PRISM_HEAD,
             extra_scripts=PRISM_MERMAID_SCRIPTS,
         ),
@@ -355,7 +355,7 @@ def build_search_page():
   crossorigin="anonymous"></script>
 <script>
 var fuse;
-fetch('/search-index.json')
+fetch('%s/search-index.json')
   .then(function(r) { return r.json(); })
   .then(function(data) {
     fuse = new Fuse(data, { keys: ['title', 'tags', 'content'], threshold: %s, ignoreLocation: true });
@@ -375,10 +375,10 @@ document.getElementById('search-input').addEventListener('input', function(e) {
     el.appendChild(li);
   });
 });
-</script>""" % (SEARCH_THRESHOLD, SEARCH_MAX_RESULTS)
+</script>""" % (BASE_PATH, SEARCH_THRESHOLD, SEARCH_MAX_RESULTS)
     write_file(
         PUBLIC_DIR / "search" / "index.html",
-        page_html("Search", content, "/search/"),
+        page_html("Search", content, f"{BASE_PATH}/search/"),
     )
 
 
@@ -411,7 +411,7 @@ def build_rss(posts):
     rss = Element("rss", version="2.0")
     channel = SubElement(rss, "channel")
     SubElement(channel, "title").text = SITE_TITLE
-    SubElement(channel, "link").text = SITE_URL
+    SubElement(channel, "link").text = f"{SITE_URL}{BASE_PATH}/"
     SubElement(channel, "description").text = SITE_DESCRIPTION
     for p in posts[:RSS_MAX_POSTS]:
         date_str = p.get("date", "")
