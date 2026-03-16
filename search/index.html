@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Search</title>
 <link rel="canonical" href="https://dysksh.github.io/blog/search/">
-<link rel="stylesheet" href="/style.css">
-<link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">
+<link rel="stylesheet" href="/blog/style.css">
+<link rel="alternate" type="application/rss+xml" title="RSS" href="/blog/rss.xml">
 </head>
 <body>
-<nav><a href="/">home</a> <a href="/posts/">posts</a> <a href="/tags/">tags</a> <a href="/search/">search</a> <a href="/about/">about</a></nav>
+<nav><a href="/blog/">home</a> <a href="/blog/posts/">posts</a> <a href="/blog/tags/">tags</a> <a href="/blog/search/">search</a> <a href="/blog/about/">about</a></nav>
 <main>
 <h1>Search</h1>
 <input type="text" id="search-input" placeholder="Search articles..." autofocus>
@@ -19,7 +19,7 @@
   crossorigin="anonymous"></script>
 <script>
 var fuse;
-fetch('/search-index.json')
+fetch('/blog/search-index.json')
   .then(function(r) { return r.json(); })
   .then(function(data) {
     fuse = new Fuse(data, { keys: ['title', 'tags', 'content'], threshold: 0.3, ignoreLocation: true });
