@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Search</title>
+<link rel="canonical" href="/search/">
+<link rel="stylesheet" href="/style.css">
+<link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">
+</head>
+<body>
+<nav><a href="/">home</a> <a href="/posts/">posts</a> <a href="/tags/">tags</a> <a href="/search/">search</a> <a href="/about/">about</a></nav>
+<main>
+<h1>Search</h1>
+<input type="text" id="search-input" placeholder="Search articles..." autofocus>
+<ul id="search-results" class="post-list"></ul>
+<script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"
+  integrity="sha384-PCSoOZTpbkikBEtd/+uV3WNdc676i9KUf01KOA8CnJotvlx8rRrETbDuwdjqTYvt"
+  crossorigin="anonymous"></script>
+<script>
+var fuse;
+fetch('/search-index.json')
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    fuse = new Fuse(data, { keys: ['title', 'tags', 'content'], threshold: 0.3, ignoreLocation: true });
+  });
+document.getElementById('search-input').addEventListener('input', function(e) {
+  var q = e.target.value.trim();
+  var el = document.getElementById('search-results');
+  if (!q || !fuse) { el.innerHTML = ''; return; }
+  var hits = fuse.search(q).slice(0, 20);
+  el.innerHTML = '';
+  hits.forEach(function(h) {
+    var li = document.createElement('li');
+    var a = document.createElement('a');
+    a.setAttribute('href', h.item.url);
+    a.textContent = h.item.title;
+    li.appendChild(a);
+    el.appendChild(li);
+  });
+});
+</script>
+</main>
+</body>
+</html>
