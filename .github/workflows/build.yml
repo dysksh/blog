@@ -25,9 +25,11 @@ jobs:
       - name: build
         env:
           SITE_TITLE: Blog
-          SITE_URL: https://dysksh.github.io/blog
+          SITE_URL: https://dysksh.github.io
           SITE_LANG: ja
           SITE_DESCRIPTION: ソフトウェアエンジニアリングに関する技術ブログ
+          # TODO: カスタムドメイン設定後はBASE_PATHを空にする
+          BASE_PATH: /blog
         run: python scripts/build.py
 
       - name: deploy
