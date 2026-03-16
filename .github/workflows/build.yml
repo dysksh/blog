@@ -25,7 +25,7 @@ jobs:
       - name: build
         env:
           SITE_TITLE: Blog
-          SITE_URL: https://dysksh.github.io
+          SITE_URL: https://dysksh.github.io/blog
           SITE_LANG: ja
           SITE_DESCRIPTION: ソフトウェアエンジニアリングに関する技術ブログ
         run: python scripts/build.py

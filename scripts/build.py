@@ -18,6 +18,9 @@ TEMPLATES_DIR = ROOT / "templates"
 PUBLIC_DIR = ROOT / "public"
 
 SITE_TITLE = os.environ.get("SITE_TITLE", "Blog")
+# TODO: カスタムドメイン設定後、SITE_URLをカスタムドメインに変更する
+# GitHub Pagesのプロジェクトサイト(/blog/)ではルート絶対パスが404になるため、
+# カスタムドメイン設定までデプロイ後のリンクが正しく動作しない
 SITE_URL = os.environ.get("SITE_URL", "")
 SITE_LANG = os.environ.get("SITE_LANG", "ja")
 SITE_DESCRIPTION = os.environ.get(
