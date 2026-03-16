@@ -1,0 +1,26 @@
+services:
+  blog:
+    build:
+      context: .
+      target: blog
+    volumes:
+      - .:/blog
+    ports:
+      - "8000:8000"
+    entrypoint: ["sleep", "infinity"]
+
+  claude:
+    build:
+      context: .
+      target: claude
+    user: ${USER_UID:-1000}:${USER_GID:-1000}
+    volumes:
+      - .:/workspace
+      - ${HOME}/.claude:${DEV_HOME:-/home/dev}/.claude
+      - ${HOME}/.claude.json:${DEV_HOME:-/home/dev}/.claude.json
+    working_dir: /workspace
+    environment:
+      - HOME=${DEV_HOME:-/home/dev}
+    entrypoint: ["sleep", "infinity"]
+    stdin_open: true
+    tty: true

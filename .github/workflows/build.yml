@@ -1,0 +1,32 @@
+name: build-blog
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install pandoc
+        env:
+          PANDOC_VERSION: "3.6"
+        run: |
+          wget -q "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          sudo dpkg -i "pandoc-${PANDOC_VERSION}-1-amd64.deb"
+
+      - name: build
+        run: python scripts/build.py
+
+      - name: deploy
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
