@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自然言語でタスクを投げるとPRが返ってくるエージェントシステム「Nemuri」開発ログ</title>
+<link rel="canonical" href="https://dysksh.github.io/blog/posts/nemuri/">
+<link rel="stylesheet" href="/blog/style.css">
+<link rel="alternate" type="application/rss+xml" title="RSS" href="/blog/rss.xml">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" integrity="sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A" crossorigin="anonymous">
+</head>
+<body>
+<nav><a href="/blog/">home</a> <a href="/blog/posts/">posts</a> <a href="/blog/tags/">tags</a> <a href="/blog/search/">search</a> <a href="/blog/about/">about</a></nav>
+<main>
+<article>
+<header>
+<h1>自然言語でタスクを投げるとPRが返ってくるエージェントシステム「Nemuri」開発ログ</h1>
+<time datetime="2026-03-18">2026-03-18</time>
+<div class="tags"><a href="/blog/tags/Go/">Go</a> <a href="/blog/tags/AWS/">AWS</a> <a href="/blog/tags/LLM/">LLM</a> <a href="/blog/tags/Claude/">Claude</a> <a href="/blog/tags/Discord/">Discord</a> <a href="/blog/tags/Agent/">Agent</a> <a href="/blog/tags/個人開発/">個人開発</a> <a href="/blog/tags/ECS Fargate/">ECS Fargate</a> <a href="/blog/tags/Lambda/">Lambda</a> <a href="/blog/tags/SQS/">SQS</a> <a href="/blog/tags/DynamoDB/">DynamoDB</a> <a href="/blog/tags/S3/">S3</a> <a href="/blog/tags/API Gateway/">API Gateway</a> <a href="/blog/tags/ECR/">ECR</a> <a href="/blog/tags/VPC/">VPC</a> <a href="/blog/tags/Secrets Manager/">Secrets Manager</a> <a href="/blog/tags/CloudWatch/">CloudWatch</a> <a href="/blog/tags/Terraform/">Terraform</a></div>
+</header>
+<h2 id="はじめに">はじめに</h2>
+<p>Nemuriは、Discordのスラッシュコマンドで自然言語のタスクを送ると、LLMエージェントがリポジトリを読み込み、コードを生成し、GitHub
+PRとして返すシステムである。PRに限らず、S3へのファイルアップロードやDiscordへのテキスト返信にも対応している。</p>
+<p>開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人開発になった。開発にはClaude
+Codeを初めて使用した。この記事ではNemuriのアーキテクチャ、実装の詳細、設計判断について書く。</p>
+<h2 id="技術スタック">技術スタック</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>カテゴリ</th>
+<th>技術</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>言語</td>
+<td>Go 1.25</td>
+</tr>
+<tr>
+<td>LLM</td>
+<td>Claude API（claude-sonnet-4-6）直接呼び出し</td>
+</tr>
+<tr>
+<td>インターフェース</td>
+<td>Discord スラッシュコマンド</td>
+</tr>
+<tr>
+<td>コンピュート</td>
+<td>ECS Fargate（エージェント実行）、Lambda（Ingress / Runner）</td>
+</tr>
+<tr>
+<td>メッセージング</td>
+<td>SQS（標準キュー + DLQ）</td>
+</tr>
+<tr>
+<td>ストレージ</td>
+<td>DynamoDB（ジョブ状態）、S3（成果物・会話コンテキスト）</td>
+</tr>
+<tr>
+<td>API</td>
+<td>API Gateway v2（HTTP API）</td>
+</tr>
+<tr>
+<td>コンテナ</td>
+<td>ECR、debian:12-slim ベースイメージ</td>
+</tr>
+<tr>
+<td>ネットワーク</td>
+<td>VPC（パブリックサブネット、NATなし）</td>
+</tr>
+<tr>
+<td>シークレット</td>
+<td>Secrets Manager</td>
+</tr>
+<tr>
+<td>ログ</td>
+<td>CloudWatch Logs</td>
+</tr>
+<tr>
+<td>IaC</td>
+<td>Terraform（モジュール構成、dev/prod環境分離）</td>
+</tr>
+<tr>
+<td>PDF変換</td>
+<td>goldmark + wkhtmltopdf</td>
+</tr>
+<tr>
+<td>主要依存</td>
+<td>aws-sdk-go-v2、aws-lambda-go、google/uuid、yuin/goldmark</td>
+</tr>
+</tbody>
+</table>
+<h2 id="アーキテクチャ">アーキテクチャ</h2>
+<h3 id="全体構成">全体構成</h3>
+<pre class="mermaid"><code>graph TB
+  subgraph Discord
+    User((User))
+  end
+
+  subgraph AWS
+    subgraph &quot;受付層&quot;
+      APIGateway[API Gateway v2&lt;br&gt;POST /interactions]
+      Ingress[Lambda: Ingress&lt;br&gt;署名検証 / ジョブ登録]
+    end
+
+    subgraph &quot;実行層&quot;
+      SQS[SQS&lt;br&gt;標準キュー + DLQ]
+      Runner[Lambda: Runner&lt;br&gt;ECSタスク起動]
+      ECS[ECS Fargate&lt;br&gt;Agent Engine]
+    end
+
+    subgraph &quot;データ層&quot;
+      DynamoDB[(DynamoDB&lt;br&gt;ジョブ状態)]
+      S3[(S3&lt;br&gt;成果物)]
+      Secrets[Secrets Manager]
+    end
+  end
+
+  subgraph &quot;外部サービス&quot;
+    Claude[Claude API]
+    GitHub[GitHub API]
+  end
+
+  User --&gt;|slash command| APIGateway
+  APIGateway --&gt; Ingress
+  Ingress --&gt;|create job| DynamoDB
+  Ingress --&gt;|enqueue| SQS
+  SQS --&gt; Runner
+  Runner --&gt;|RunTask| ECS
+  ECS --&gt; Claude
+  ECS --&gt;|create PR| GitHub
+  ECS --&gt;|upload| S3
+  ECS --&gt;|state| DynamoDB
+  ECS --&gt;|get secrets| Secrets
+  ECS --&gt;|notify| User</code></pre>
+<p>設計原則は「常時起動するインフラを持たない」こと。1ジョブ = 1
+ECSタスクのワンショット実行で、ジョブがなければAWS費用はほぼゼロになる。長時間起動するサービスは存在しない。</p>
+<h3 id="リクエストフロー">リクエストフロー</h3>
+<ol type="1">
+<li>ユーザーがDiscordで <code>/agent &lt;プロンプト&gt;</code>
+を実行</li>
+<li>Discord → API Gateway v2（HTTP API）→ Ingress Lambda が起動</li>
+<li>Ingress Lambda
+がEd25519署名を検証し、DynamoDBにジョブレコード（state=INIT）を作成、SQSにエンキュー</li>
+<li>Discordにはdeferred
+ACK（type=5）を3秒以内に返す。Discordのインタラクション応答期限が3秒のため、ジョブ処理は非同期で行う必要がある</li>
+<li>SQSトリガーでRunner Lambdaが起動し、ECS
+Fargateタスクをキック。コンテナオーバーライドで環境変数
+<code>JOB_ID</code> を渡す。Runner
+Lambda成功時にSQSメッセージはイベントソースマッピングにより自動削除される</li>
+<li>ECSコンテナ上でAgent Engineが起動。ロック取得 → ジョブ実行 →
+結果配信</li>
+</ol>
+<h2 id="インフラ構成">インフラ構成</h2>
+<h3 id="terraformモジュール構成">Terraformモジュール構成</h3>
+<p>Terraformは機能単位でモジュール化し、<code>envs/{dev,prod}</code>
+から呼び出す構成にしている。</p>
+<pre><code>terraform/
+├── envs/
+│   ├── dev/main.tf
+│   └── prod/main.tf
+└── modules/
+    ├── network/          # VPC, パブリックサブネット, IGW, セキュリティグループ
+    ├── ecr/              # ECRリポジトリ（タグミュータブル、直近5イメージ保持）
+    ├── ecs/              # ECSクラスタ, タスク定義, 実行ロール, タスクロール
+    ├── sqs/              # 標準キュー（visibility 600秒）+ DLQ（maxReceiveCount: 3）
+    ├── lambda_ingress/   # Lambda + API Gateway v2 + POST /interactions ルート
+    ├── lambda_runner/    # Lambda + SQSイベントソースマッピング
+    ├── dynamodb/         # ジョブテーブル（job_id PK, thread_id GSI, TTL, PAY_PER_REQUEST）
+    ├── s3/               # 成果物バケット（AES256暗号化, ライフサイクルルール）
+    ├── secrets/          # Secrets Managerリソース
+    └── iam/              # 共有IAMポリシー</code></pre>
+<p>各モジュールの出力（ARN, URL,
+ID）を次のモジュールの入力に渡しており、Terraformはこの依存関係から
+network → secrets → dynamodb → sqs → lambda_ingress → s3 → ecr → ecs →
+lambda_runner の順で作成する。</p>
+<h3 id="ネットワーク設計">ネットワーク設計</h3>
+<p>VPCにパブリックサブネットを配置し、ECSタスクにパブリックIPを割り当てる。NATゲートウェイは使わない（常時課金を避けるため）。</p>
+<p>セキュリティグループはegressをTCP
+443（HTTPS）のみに制限している。フォワードプロキシ（Squid等）によるドメイン制限も検討したが、個人開発の規模に対してコストと運用負荷が見合わないため見送った。</p>
+<h3 id="ecsタスク定義">ECSタスク定義</h3>
+<p>タスク定義では7つの環境変数をコンテナに渡す。シークレットの実値ではなく、Secrets
+Managerのシークレット名を渡す点がポイントである。</p>
+<pre class="hcl"><code>resource &quot;aws_ecs_task_definition&quot; &quot;agent&quot; {
+  family                   = &quot;${var.project}-${var.environment}-agent-engine&quot;
+  requires_compatibilities = [&quot;FARGATE&quot;]
+  network_mode             = &quot;awsvpc&quot;
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+
+  container_definitions = jsonencode([{
+    name  = &quot;agent-engine&quot;
+    image = &quot;${var.ecr_repository_url}:latest&quot;
+    environment = [
+      { name = &quot;DYNAMODB_TABLE_NAME&quot;,            value = var.dynamodb_table_name },
+      { name = &quot;AWS_REGION&quot;,                     value = var.aws_region },
+      { name = &quot;ANTHROPIC_API_KEY_SECRET_NAME&quot;,  value = var.anthropic_api_key_secret_name },
+      { name = &quot;DISCORD_BOT_TOKEN_SECRET_NAME&quot;,  value = var.discord_bot_token_secret_name },
+      { name = &quot;GITHUB_PAT_SECRET_NAME&quot;,         value = var.github_pat_secret_name },
+      { name = &quot;S3_BUCKET_NAME&quot;,                 value = var.s3_bucket_name },
+      { name = &quot;DEFAULT_GITHUB_OWNER&quot;,           value = var.default_github_owner },
+    ]
+    logConfiguration = {
+      logDriver = &quot;awslogs&quot;
+      options   = { /* CloudWatch Logs: /ecs/{project}-{env}/agent-engine, 14日保持 */ }
+    }
+  }])
+}</code></pre>
+<p>Agent Engineの起動時にシークレット系はSecrets
+Managerから実際のAPIキー/トークンを取得し、それ以外はタスク定義の環境変数から読み込む。タスクロールにはDynamoDB、S3、Secrets
+Manager、CloudWatch
+Logsの操作権限を付与している。ECSタスクはSQSとは直接やり取りしない（SQSメッセージの削除はRunner
+Lambda成功時にイベントソースマッピングが行う）。</p>
+<h3 id="コスト構造">コスト構造</h3>
+<p>常時稼働するリソースがないため、月額はジョブ実行量に完全に比例する。</p>
+<ul>
+<li><strong>ECS Fargate</strong>:
+ジョブ実行時間に比例。CPU/メモリは変数化（デフォルト: 0.25 vCPU / 512
+MiB）</li>
+<li><strong>Lambda</strong>: Ingress（128MB /
+10秒タイムアウト）、Runner（128MB / 30秒タイムアウト。RunTask
+API応答待ちを考慮）</li>
+<li><strong>DynamoDB</strong>:
+PAY_PER_REQUEST。TTL（<code>ttl</code>属性）で自動削除</li>
+<li><strong>S3</strong>: ライフサイクルルールでartifacts /
+outputsを自動削除（日数は変数化）。アウトプットはプリサインドURL（24時間有効）で配信</li>
+<li><strong>SQS</strong>: 標準キュー +
+DLQ（14日保持）。メインキュー保持期間は1日</li>
+</ul>
+<h2 id="ソースコード構造">ソースコード構造</h2>
+<pre><code>nemuri/
+├── cmd/
+│   ├── agent-engine/        # ECS上で動くメインバイナリ
+│   ├── lambda-ingress/      # Discord受付
+│   └── lambda-runner/       # SQS → ECS RunTask
+├── internal/
+│   ├── agent/               # 2フェーズエージェントループ + レビューループ
+│   │   ├── agent.go         # Gathering → Generating オーケストレーション
+│   │   ├── review.go        # Review → Rewrite サイクル
+│   │   └── prompt.go        # システムプロンプト + ツール定義
+│   ├── executor/            # ジョブ実行オーケストレータ
+│   │   ├── executor.go      # メインディスパッチ + 質問ハンドリング
+│   │   ├── code.go          # code/new_repo → GitHub PR
+│   │   ├── file.go          # file → S3アップロード
+│   │   ├── text.go          # text → Discordメッセージ
+│   │   └── resume.go        # 会話コンテキスト復元
+│   ├── llm/                 # LLMアダプタ
+│   │   ├── llm.go           # Client interface + 型定義
+│   │   └── claude.go        # Claude API実装（リトライ, レート制限）
+│   ├── state/               # DynamoDB状態管理
+│   │   ├── state.go         # ステートマシン + 遷移検証
+│   │   └── store.go         # DynamoDB CRUD + ロック
+│   ├── converter/           # Markdown → HTML → PDF（goldmark + wkhtmltopdf）
+│   ├── discord/             # Discord APIクライアント（v10）
+│   ├── github/              # GitHub APIクライアント (interface + 実装)
+│   ├── secrets/             # AWS Secrets Managerラッパー
+│   └── storage/             # S3操作ラッパー
+├── Dockerfile               # マルチステージビルド (3段)
+└── go.mod</code></pre>
+<p>言語はGo。Lambda（<code>provided.al2023</code>
+ランタイム）とECSの両方で単一バイナリにできること、AWS SDK
+v2が充実していること、最近の業務で使っていることが選定理由。</p>
+<p>外部サービスとのやり取りは専用パッケージに分離している。<code>github.API</code>
+や <code>llm.Client</code>
+をインターフェースとして定義し、テスト時にモックに差し替えられるようにしている。Executorのテストではモックを使った単体テストを書いており、LLM呼び出しやGitHub
+API呼び出しなしでジョブ実行フローを検証できる。<code>llm.Client</code>
+インターフェースは将来的なモデル差し替えにも対応する設計になっている。</p>
+<h3 id="ingress-lambda-の実装">Ingress Lambda の実装</h3>
+<p>Ingress Lambdaはインタラクションタイプに応じて処理を分岐する。</p>
+<pre class="go"><code>switch interaction.Type {
+case InteractionTypePing:        // 1
+    // Discord Webhook検証。PONGを返す
+    return respondJSON(http.StatusOK, discordResponse{Type: ResponseTypePong})
+
+case InteractionTypeApplicationCommand:  // 2
+    // 通常のコマンド実行 or スレッド内での回答/承認
+    return handleApplicationCommand(ctx, interaction)
+}</code></pre>
+<p><code>handleApplicationCommand</code>
+内では以下の順序で分岐する。</p>
+<ol type="1">
+<li>プロンプトを抽出。空なら即座にエラー応答</li>
+<li>プロンプトが <code>"approve"</code> なら <code>handleApprove</code>
+へ — Discordスレッド内では <code>channel_id</code> にthread
+IDが入るため、その値で <code>thread_id-index</code>
+GSIを検索し、WAITING_APPROVAL状態のジョブがあれば
+<code>ApproveJob</code> を呼んでDONEに遷移</li>
+<li>同様に <code>thread_id-index</code>
+GSIで検索し、WAITING_USER_INPUT状態のジョブがあれば
+<code>handleResume</code> へ — <code>SetUserResponse</code>
+でユーザー回答を保存し、SQSに再エンキュー</li>
+<li>どちらでもなければ <code>handleNewJob</code> —
+DynamoDBにジョブレコード作成、SQSにエンキュー</li>
+</ol>
+<p>署名検証はEd25519を使う。DiscordのPublic Keyで
+<code>timestamp + body</code> を検証する。</p>
+<pre class="go"><code>func verifySignature(pubKey ed25519.PublicKey, signature, timestamp, body string) bool {
+    sig, err := hex.DecodeString(signature)
+    if err != nil {
+        return false
+    }
+    return ed25519.Verify(pubKey, []byte(timestamp+body), sig)
+}</code></pre>
+<h2 id="agent-engine-2フェーズのエージェントループ">Agent Engine:
+2フェーズのエージェントループ</h2>
+<p>Agent Engineの核心は <code>internal/agent</code>
+パッケージにある。「Gathering（情報収集）」と「Generating（成果物生成）」の2フェーズで動作する。</p>
+<pre class="mermaid"><code>graph TD
+  Start([ジョブ開始]) --&gt; Gather[Phase 1: Gathering]
+  Gather --&gt;|list_repo_files| ReadFiles[リポジトリのファイルツリー取得]
+  ReadFiles --&gt;|read_repo_file| ReadMore[ファイル内容読み込み]
+  ReadMore --&gt;|まだ情報不足| ReadFiles
+  ReadMore --&gt;|十分な情報| Summary[テキストで分析サマリ生成]
+  Gather --&gt;|不明点あり| AskUser[ask_user_question]
+  AskUser --&gt;|コンテキスト保存 → ECS終了| Wait[WAITING_USER_INPUT]
+  Wait --&gt;|ユーザー回答 → 新ECSタスク| Gather
+  Summary --&gt; Generate[Phase 2: Generating]
+  Generate --&gt;|deliver_result| Result{成果物タイプ}
+  Result --&gt;|code| PR[GitHub PR作成]
+  Result --&gt;|file| S3Upload[S3アップロード]
+  Result --&gt;|text| DiscordMsg[Discordメッセージ]
+  Result --&gt;|new_repo| NewRepo[新規リポジトリ + PR]
+  PR --&gt; Review[Review Loop]
+  NewRepo --&gt; Review
+  Review --&gt;|avg score &gt;= 7.0| Done([完了])
+  Review --&gt;|avg score &lt; 7.0| Rewrite[Rewrite]
+  Rewrite --&gt; Review</code></pre>
+<h3 id="phase-1-gathering">Phase 1: Gathering</h3>
+<p>LLMに渡すツールは最小限に絞っている。</p>
+<pre class="go"><code>func (a *Agent) buildGatheringSendOptions() *llm.SendOptions {
+    tools := []llm.ToolDefinition{
+        {Name: &quot;ask_user_question&quot;, Description: &quot;Ask the user a question...&quot;},
+    }
+    // GitHubクライアントがある場合のみリポジトリツールを追加
+    if a.github != nil {
+        tools = append(tools,
+            llm.ToolDefinition{Name: &quot;list_repo_files&quot;, Description: &quot;List all files in a GitHub repository...&quot;},
+            llm.ToolDefinition{Name: &quot;read_repo_file&quot;, Description: &quot;Read the content of a file...&quot;},
+        )
+    }
+    return &amp;llm.SendOptions{
+        Tools:      tools,
+        ToolChoice: &amp;llm.ToolChoice{Type: &quot;auto&quot;},
+    }
+}</code></pre>
+<p>GitHubクライアントが未設定の場合（ファイル生成タスクなど）、リポジトリ読み取りツールは渡さない。任意のコマンド実行やファイル書き込みのツールは意図的に渡していない。</p>
+<p>Gatheringフェーズのループ上限は15イテレーション、累積出力トークンの上限は32,768トークン。各イテレーションでは残トークン数を計算し、<code>min(残り, 16384)</code>
+をMaxTokensとして渡す。</p>
+<p>LLMがテキストのみ（ツールコールなし）で応答した場合、それが分析サマリと判断してGatheringフェーズを終了する。ツールコールがあればそれを実行し、結果を会話に追加して次のイテレーションに進む。</p>
+<p>15イテレーション到達時はツールを外して「サマリを出せ」と明示的に指示する。</p>
+<h4 id="コンテキストウィンドウの管理">コンテキストウィンドウの管理</h4>
+<p>イテレーションが増えると会話履歴が肥大化する。これに対処するため、古いイテレーションのツール結果をトリミングする機構を入れている。</p>
+<pre class="go"><code>const (
+    keepRecentIterations = 3     // 直近3イテレーションは完全保持
+    trimContentThreshold = 500   // 500バイト以下のツール結果はトリミングしない
+    trimPreviewLines     = 20    // トリミング時に先頭20行だけ残す
+)</code></pre>
+<p>直近3イテレーション以外のツール結果で、500バイトを超えるものは先頭20行にトリミングされる。これにより、長いファイル内容が会話コンテキストを圧迫することを防ぐ。読み込んだファイルの完全な内容は
+<code>fileCache</code>（<code>map[string]string</code>、キーは
+<code>repo:path</code>）に保存されており、Generatingフェーズで参照できる。</p>
+<h4 id="ask_user_question-の処理">ask_user_question の処理</h4>
+<p>LLMが <code>ask_user_question</code>
+と他のツール（<code>list_repo_files</code>
+等）を同時に呼んだ場合、リポジトリ読み取りツールを先に実行してから質問を処理する。これによりファイル読み取り結果が失われない。</p>
+<pre class="go"><code>var pendingAsk *llm.ToolCall
+for _, tc := range resp.ToolCalls {
+    if tc.Name == askToolName {
+        pendingAsk = &amp;llm.ToolCall{ID: tc.ID, Name: tc.Name, InputJSON: tc.InputJSON}
+        continue  // 後で処理
+    }
+    // リポジトリツールを先に実行
+    toolResult, toolErr := a.executeTool(ctx, tc.Name, tc.InputJSON)
+    toolResults = append(toolResults, llm.ToolResultBlock{...})
+}</code></pre>
+<p>質問がある場合、すべてのツール結果（リポジトリ読み取り +
+ask_user_questionのプレースホルダー）を1つのuserメッセージにまとめて会話に追加する。プレースホルダーの
+<code>tool_result</code>（Content: “Waiting for user
+response.”）は、resume時にユーザー回答で置換される。</p>
+<h3 id="phase-2-generating">Phase 2: Generating</h3>
+<p>Gatheringの結果を新しいコンテキストに詰め込み、単一のLLMコールで成果物を生成する。GatheringフェーズとはMaxTokensの予算が独立している。</p>
+<pre class="go"><code>const generatingMaxTokens = 16384  // Gatheringの累積予算(32768)とは独立
+
+func (a *Agent) generatingPhase(ctx context.Context, prompt string, gathering *gatheringResult) (*RunResult, error) {
+    contextMsg := buildGeneratingContext(prompt, gathering.summary, gathering.fileCache, gathering.messages)
+    messages := []llm.Message{{Role: llm.RoleUser, Content: contextMsg}}
+
+    opts := buildGeneratingSendOptions()          // deliver_result のみ、ToolChoice強制
+    opts.MaxTokens = generatingMaxTokens
+
+    resp, err := a.llm.SendMessage(ctx, GeneratingSystemPrompt, messages, opts)
+    // ...
+}</code></pre>
+<p><code>buildGeneratingContext</code>
+は以下の構造でコンテキストを組み立てる。</p>
+<ol type="1">
+<li><strong>Original Request</strong>: ユーザーの元のプロンプト</li>
+<li><strong>User Clarifications</strong>:
+Gatheringフェーズ中のQ&amp;Aがあれば追加（<code>extractQAPairs</code>
+で会話履歴から抽出）</li>
+<li><strong>Your Analysis</strong>:
+Gatheringフェーズのテキストサマリ</li>
+<li><strong>File Contents</strong>: <code>fileCache</code>
+のファイル内容全体（キーをソートして出力）</li>
+</ol>
+<p>ToolChoiceを <code>{Type: "tool", Name: "deliver_result"}</code>
+に設定しているため、LLMは必ず <code>deliver_result</code> を呼ぶ。応答の
+<code>deliver_result</code> の入力JSONを <code>AgentResponse</code>
+にアンマーシャルして返す。</p>
+<pre class="go"><code>type AgentResponse struct {
+    Type            string       `json:&quot;type&quot;`              // &quot;text&quot;, &quot;code&quot;, &quot;new_repo&quot;, &quot;file&quot;
+    Content         string       `json:&quot;content,omitempty&quot;` // text用
+    Repo            string       `json:&quot;repo,omitempty&quot;`
+    RepoDescription string       `json:&quot;repo_description,omitempty&quot;` // new_repo用
+    Title           string       `json:&quot;title,omitempty&quot;`   // PR title
+    Description     string       `json:&quot;description,omitempty&quot;` // PR description
+    Files           []OutputFile `json:&quot;files,omitempty&quot;`
+}</code></pre>
+<h3 id="review-loop">Review Loop</h3>
+<p>code/new_repo
+タイプの成果物に対して、自己レビューサイクルを実行する。text/file
+はレビューしない。</p>
+<pre class="go"><code>func (a *Agent) ReviewLoop(ctx context.Context, prompt string, resp *AgentResponse, cfg ReviewConfig) (*ReviewLoopResult, error) {
+    for revision := range cfg.MaxRevisions {  // 最大3回
+        review, _, _, err := a.Review(ctx, prompt, result.Response)
+        avgScore := review.Scores.Average()
+
+        // 合格判定
+        if avgScore &gt;= cfg.PassThreshold { return result, nil }  // 7.0以上で合格
+
+        // 収束判定: スコア改善が0.1未満で2ラウンド続いたら打ち切り
+        if len(scoreHistory) &gt;= cfg.MinImprovementRounds {
+            improvement := recent[len(recent)-1] - recent[0]
+            if improvement &lt; cfg.MinImprovement { return result, nil }
+        }
+
+        // 同一指摘の繰り返し検出: 同じissue.Messageが3回出たら打ち切り
+        if hasRepeatedIssues(result.Reviews, cfg.MaxSameIssueCount) { return result, nil }
+
+        // minorのみなら合格扱い
+        if len(review.Issues) &gt; 0 &amp;&amp; hasOnlyMinorIssues(review.Issues) { return result, nil }
+
+        // significantなissueがなければRewriteをスキップして次のレビューへ
+        significantIssues := filterSignificantIssues(review.Issues)
+        if len(significantIssues) == 0 { continue }
+
+        // Rewrite: critical/majorのissueだけ渡す
+        rewritten, _, _, _ := a.Rewrite(ctx, prompt, result.Response, filteredReview)
+        result.Response = rewritten
+    }
+}</code></pre>
+<p>レビューは別のLLMコール（MaxTokens:
+8192）で行い、<code>submit_review</code>
+ツールを強制呼び出しさせる。4軸でスコアリングし、issue一覧と総評を返す。</p>
+<pre class="go"><code>type ReviewScores struct {
+    Correctness     float64 `json:&quot;correctness&quot;`     // 正確性
+    Security        float64 `json:&quot;security&quot;`         // セキュリティ
+    Maintainability float64 `json:&quot;maintainability&quot;` // 保守性
+    Completeness    float64 `json:&quot;completeness&quot;`    // 完全性
+}
+
+type ReviewIssue struct {
+    File     string `json:&quot;file&quot;`
+    Line     string `json:&quot;line,omitempty&quot;`
+    Severity string `json:&quot;severity&quot;` // &quot;critical&quot;, &quot;major&quot;, &quot;minor&quot;
+    Category string `json:&quot;category&quot;` // &quot;correctness&quot;, &quot;security&quot;, &quot;maintainability&quot;, &quot;completeness&quot;
+    Message  string `json:&quot;message&quot;`
+}</code></pre>
+<p>Rewrite（MaxTokens:
+16384）にはminorを除いたissueのみを渡す。Rewriteのシステムプロンプトは「指摘された問題だけを修正せよ、無関係な変更をするな」と明示している。Rewrite後のレスポンスが新しいレビュー対象になり、サイクルが繰り返される。</p>
+<p>significantなissueがなくスコアだけ低い場合（LLMが具体的な指摘なしに低スコアをつけた場合）、Rewriteしても改善しないためスキップして次のレビューに進む。</p>
+<p>収束判定のうち「同一指摘の繰り返し検出」は <code>issue.Message</code>
+の完全一致で判定している。LLMが同じ問題を異なる文言で指摘した場合は検出できないが、実用上は許容している。</p>
+<h2 id="ジョブ状態管理">ジョブ状態管理</h2>
+<h3 id="ステートマシン">ステートマシン</h3>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; INIT: Ingress Lambda&lt;br&gt;ジョブ作成(CreateJob)
+  INIT --&gt; RUNNING: Agent Engine&lt;br&gt;ロック取得(AcquireLock)
+  RUNNING --&gt; DONE: Agent Engine&lt;br&gt;正常完了(MarkDone)
+  RUNNING --&gt; FAILED: Agent Engine&lt;br&gt;エラー(MarkFailed)
+  RUNNING --&gt; WAITING_USER_INPUT: Agent Engine&lt;br&gt;質問あり(MarkWaitingUserInput)
+  RUNNING --&gt; WAITING_APPROVAL: Agent Engine&lt;br&gt;PR作成済み(MarkWaitingApproval)
+  WAITING_USER_INPUT --&gt; RUNNING: Agent Engine&lt;br&gt;ユーザー回答後(AcquireLock)
+  WAITING_APPROVAL --&gt; DONE: Ingress Lambda&lt;br&gt;承認(ApproveJob)
+  FAILED --&gt; RUNNING: Agent Engine&lt;br&gt;リトライ(AcquireLock)</code></pre>
+<p><code>allowedTransitions</code>
+マップによる遷移検証と、<code>AcquireLock</code>
+のConditionExpressionによる遷移は別の仕組みである。<code>ValidateTransition</code>
+は <code>TransitionState</code>, <code>MarkDone</code>,
+<code>MarkFailed</code>, <code>MarkWaitingUserInput</code>,
+<code>MarkWaitingApproval</code>
+の各メソッド内で呼ばれる。一方、<code>AcquireLock</code> は
+<code>ValidateTransition</code>
+を経由せず、DynamoDBのConditionExpressionで直接
+<code>state IN (INIT, FAILED, WAITING_USER_INPUT)</code>
+を検査してRUNNINGに遷移する。つまり
+<code>INIT → RUNNING</code>、<code>FAILED → RUNNING</code>、<code>WAITING_USER_INPUT → RUNNING</code>
+の3つはすべて <code>AcquireLock</code>
+のConditionExpressionが担っている。</p>
+<pre class="go"><code>var allowedTransitions = map[JobState][]JobState{
+    StateInit:             {StateRunning},
+    StateRunning:          {StateWaitingUserInput, StateWaitingApproval, StateDone, StateFailed},
+    StateWaitingUserInput: {StateRunning},
+    StateWaitingApproval:  {StateDone, StateFailed},
+}</code></pre>
+<h3 id="dynamodbのジョブレコード">DynamoDBのジョブレコード</h3>
+<pre class="go"><code>type Job struct {
+    JobID            string   `dynamodbav:&quot;job_id&quot;`             // PK (UUID v4)
+    ThreadID         string   `dynamodbav:&quot;thread_id,omitempty&quot;` // GSI: thread_id-index
+    ChannelID        string   `dynamodbav:&quot;channel_id&quot;`
+    RequestUserID    string   `dynamodbav:&quot;request_user_id,omitempty&quot;`
+    InteractionToken string   `dynamodbav:&quot;interaction_token&quot;`
+    ApplicationID    string   `dynamodbav:&quot;application_id&quot;`
+
+    State    JobState `dynamodbav:&quot;state&quot;`
+    Revision int      `dynamodbav:&quot;revision&quot;`
+
+    WorkerID    string `dynamodbav:&quot;worker_id,omitempty&quot;`   // ロック所有者UUID
+    HeartbeatAt int64  `dynamodbav:&quot;heartbeat_at,omitempty&quot;` // Unixタイムスタンプ
+    Version     int    `dynamodbav:&quot;version&quot;`                // 状態遷移時のみインクリメント
+
+    Prompt       string `dynamodbav:&quot;prompt&quot;`
+    UserResponse string `dynamodbav:&quot;user_response,omitempty&quot;`
+    ErrorMessage string `dynamodbav:&quot;error_message,omitempty&quot;`
+
+    CreatedAt int64 `dynamodbav:&quot;created_at&quot;`
+    UpdatedAt int64 `dynamodbav:&quot;updated_at&quot;`
+    TTL       int64 `dynamodbav:&quot;ttl&quot;`                     // created_at + 30日
+}</code></pre>
+<p>テーブル設計のポイント:</p>
+<ul>
+<li><strong>PK</strong>: <code>job_id</code>（UUID
+v4）。ソートキーなし</li>
+<li><strong>GSI</strong>: <code>thread_id-index</code>（projection:
+ALL）。Discordスレッドからジョブを逆引きするため</li>
+<li><strong>TTL</strong>:
+<code>created_at + 30日</code>（<code>30 * 24 * time.Hour</code>）。古いジョブは自動的に削除される</li>
+<li><strong>version</strong>:
+楽観的ロック用。状態遷移時のみインクリメント。ハートビートでは変更しない</li>
+<li><strong>worker_id</strong>:
+ロック所有者を示すUUID。ECSタスク起動時に <code>uuid.New()</code>
+で生成</li>
+<li><strong>heartbeat_at</strong>:
+Unixタイムスタンプ。10分（<code>HeartbeatExpiry</code>）以内に更新がなければロック失効とみなす</li>
+</ul>
+<h3 id="ロック機構">ロック機構</h3>
+<p>DynamoDBの条件付き書き込み（Conditional
+Write）で排他制御を実現する。</p>
+<pre class="go"><code>func (s *Store) AcquireLock(ctx context.Context, jobID, workerID string) error {
+    now := time.Now().Unix()
+    expired := now - int64(HeartbeatExpiry.Seconds()) // HeartbeatExpiry = 10分
+
+    _, err := s.client.UpdateItem(ctx, &amp;dynamodb.UpdateItemInput{
+        Key: map[string]types.AttributeValue{
+            &quot;job_id&quot;: &amp;types.AttributeValueMemberS{Value: jobID},
+        },
+        UpdateExpression: aws.String(
+            &quot;SET #state = :running, worker_id = :wid, heartbeat_at = :now, &quot; +
+            &quot;updated_at = :now, version = version + :one&quot;),
+        ConditionExpression: aws.String(
+            // :waiting = WAITING_USER_INPUT
+            &quot;(#state IN (:init, :failed, :waiting)) AND &quot; +
+            &quot;(attribute_not_exists(worker_id) OR worker_id = :empty OR heartbeat_at &lt; :expired)&quot;),
+        // ...
+    })
+    return err
+}</code></pre>
+<p>ロック取得の条件は2つの論理ANDで構成される。</p>
+<ol type="1">
+<li><strong>state条件</strong>:
+<code>INIT</code>、<code>FAILED</code>、<code>WAITING_USER_INPUT</code>
+のいずれか。<code>RUNNING</code>、<code>DONE</code>、<code>WAITING_APPROVAL</code>
+のジョブはロック取得できない</li>
+<li><strong>worker条件</strong>: <code>worker_id</code>
+が未設定（<code>attribute_not_exists</code>）、空文字、または
+<code>heartbeat_at</code> が10分以上前（＝前のワーカーが死んだ）</li>
+</ol>
+<p>ConditionCheckFailedExceptionが返った場合、別のワーカーが既にロックを取得しているか、ジョブが不正な状態にある。Agent
+Engineはこのエラーでexit 1する。なお、SQSメッセージはRunner
+Lambdaの正常終了時にイベントソースマッピングが削除済みのため、SQS経由の自動リトライは発生しない。DynamoDBのジョブレコードはINITまたはRUNNING状態で残るため、手動での再実行は可能である。</p>
+<h3 id="ハートビートとversion分離">ハートビートとversion分離</h3>
+<p>ハートビートは3分間隔（<code>heartbeatInterval = 3 * time.Minute</code>）で
+<code>heartbeat_at</code> と <code>updated_at</code>
+のみを更新する。<code>version</code>
+はインクリメントしない。ConditionExpressionは
+<code>worker_id = :wid</code>
+のみで、自分がロック所有者であることだけを検証する。</p>
+<p><code>version</code>
+を状態遷移時のみインクリメントする理由は、楽観的ロックの競合をハートビートで引き起こさないためである。<code>MarkWaitingUserInput</code>
+や <code>MarkWaitingApproval</code> は
+<code>worker_id = :wid AND version = :v</code>
+を条件にしており、並行するハートビートが <code>version</code>
+を変更すると遷移が失敗する。</p>
+<h3 id="sqsの役割と制約">SQSの役割と制約</h3>
+<p>SQSはIngress
+LambdaとECSタスク起動の間のバッファとして機能している。Discordのインタラクション応答期限は3秒だが、Ingress
+Lambdaが直接 <code>RunTask</code>
+を呼ぶと500ms〜2sかかり、署名検証やDynamoDB書き込みと合わせると3秒を超えるリスクがある。SQS
+<code>SendMessage</code>
+は20〜50msで完了するため、この時間的制約を安全にクリアできる。</p>
+<p>また、Ingress
+LambdaはSQSにメッセージを投げるだけで、後段がECSかLambdaかを知る必要がない。実行基盤を変更してもIngress側は無変更で済む。</p>
+<p>SQSイベントソースマッピングでRunner Lambdaが起動され、Runner Lambdaが
+<code>RunTask</code> でECSタスクを起動する。</p>
+<p>重要なのは、SQSメッセージのライフサイクルがRunner
+Lambdaの成否に連動する点である。Runner
+Lambdaが正常終了すると、イベントソースマッピングがSQSメッセージを自動削除する。つまり
+<strong>ECSタスクが起動した時点でSQSメッセージは既に削除されている</strong>。</p>
+<ul>
+<li><strong>Runner Lambdaが成功した場合</strong>（通常ケース）:
+SQSメッセージはイベントソースマッピングにより自動削除される。以降のジョブ状態管理はDynamoDBが担う</li>
+<li><strong>Runner Lambdaが失敗した場合</strong>（<code>RunTask</code>
+API失敗、ECSキャパシティ不足等）:
+SQSメッセージはキューに戻り、visibility
+timeout後に再配信される。maxReceiveCount（3回）を超えるとDLQに移動する</li>
+</ul>
+<p>ECSタスク内部のエラー（ジョブ実行失敗、AcquireLock失敗、パニック等）ではSQSメッセージは既に削除されているため、SQS経由の自動リトライは発生しない。ECSタスクの失敗はDynamoDBのジョブレコード（FAILED状態）として記録され、リカバリは手動対応になる。ECSタスクレベルの自動リトライを入れていないのは、LLM
+APIコストが1ジョブあたり数百円かかることがあるため、失敗原因を確認せずにリトライすると同じエラーでコストだけが積み上がるリスクがあるからである。</p>
+<p>SQSメッセージのライフサイクルはRunner
+Lambdaの成否に連動するため、ECSタスク側にはSQS操作のコードを持たせていない。ECSタスクはジョブの状態管理をDynamoDB経由で行い、SQSには関与しない。</p>
+<p>ユーザー回答による再開フローでは、Ingress
+Lambdaが新しいSQSメッセージをエンキューすることで新たなECSタスクが起動する。PR承認はIngress
+Lambda側で完結するため、ECSタスクの起動は不要。</p>
+<h2 id="ユーザーインタラクション">ユーザーインタラクション</h2>
+<h3 id="質問フロー">質問フロー</h3>
+<p>エージェントが <code>ask_user_question</code>
+を呼んだ場合の処理フローを追う。</p>
+<ol type="1">
+<li><strong>Agent Engine</strong>: <code>agent.Run</code> が
+<code>RunResult{Question: "...", Messages: [...], PendingToolCallID: "toolu_xxx", Phase: "gathering", FileCache: {...}}</code>
+を返す</li>
+<li><strong>Executor</strong>: <code>HandleQuestionOutcome</code>
+が呼ばれる
+<ul>
+<li>会話コンテキスト（Messages, PendingToolCallID, Phase,
+FileCache）をJSONにシリアライズしてS3の
+<code>artifacts/{job_id}/conversation_context.json</code> に保存</li>
+<li>Discordにスレッドを作成（PUBLIC_THREAD, auto_archive:
+1440分）し、質問を投稿</li>
+<li><code>MarkWaitingUserInput</code> で状態遷移。<code>thread_id</code>
+を保存、<code>worker_id</code> と <code>heartbeat_at</code> を削除</li>
+</ul></li>
+<li><strong>Agent Engine</strong>: 正常終了（SQSメッセージはRunner
+Lambda成功時に既に削除済み）</li>
+</ol>
+<pre class="go"><code>type conversationContext struct {
+    Messages          []llm.Message     `json:&quot;messages&quot;`
+    PendingToolCallID string            `json:&quot;pending_tool_call_id&quot;`
+    Phase             string            `json:&quot;phase,omitempty&quot;`       // &quot;gathering&quot;
+    FileCache         map[string]string `json:&quot;file_cache,omitempty&quot;`
+}</code></pre>
+<h3 id="回答再開フロー">回答→再開フロー</h3>
+<ol type="1">
+<li><strong>Ingress Lambda</strong>: ユーザーがスレッドで
+<code>/agent &lt;回答&gt;</code> と入力。スレッド内では
+<code>channel_id</code> にthread
+IDが入るため、<code>thread_id-index</code>
+GSIでWAITING_USER_INPUT状態のジョブを特定</li>
+<li><strong>Ingress Lambda</strong>: <code>SetUserResponse</code>
+でDynamoDBにユーザー回答と新しい <code>interaction_token</code>
+を保存。SQSにresumeメッセージをエンキュー。Discordにはdeferred
+ACK（type=5）を返す</li>
+<li><strong>Runner Lambda → ECS</strong>:
+新しいECSタスクが起動。<code>AcquireLock</code> でWAITING_USER_INPUT →
+RUNNINGに遷移。<code>job.UserResponse != ""</code>
+でresumeフローと判定</li>
+<li><strong>Executor</strong>:
+S3から会話コンテキストを復元。プレースホルダーの
+<code>tool_result</code> をユーザー回答で置換</li>
+</ol>
+<pre class="go"><code>func (e *Executor) resumeAgent(ctx context.Context, job *state.Job) (*agent.RunResult, error) {
+    data, err := e.Storage.DownloadArtifact(ctx, job.JobID, conversationContextFile)
+    var convCtx conversationContext
+    json.Unmarshal(data, &amp;convCtx)
+
+    // プレースホルダーをユーザー回答で置換
+    ReplaceToolResult(convCtx.Messages, convCtx.PendingToolCallID,
+        fmt.Sprintf(&quot;User responded: %s&quot;, job.UserResponse))
+
+    return e.Agent.Resume(ctx, convCtx.Messages, convCtx.Phase, convCtx.FileCache)
+}</code></pre>
+<p><code>ReplaceToolResult</code>
+は会話履歴の末尾から探索し、<code>tool_use_id</code> が一致する
+<code>tool_result</code>
+ブロックのContentを差し替える。S3経由でJSONをラウンドトリップするとGoの型が
+<code>[]llm.ToolResultBlock</code>（インメモリ）から
+<code>[]any</code>（<code>map[string]any</code>
+要素）に変わるため、両方のパターンに対応している。</p>
+<ol start="5" type="1">
+<li><strong>Agent</strong>: <code>Resume</code>
+が呼ばれ、Gatheringフェーズの途中から再開。<code>fileCache</code>
+も復元されているため、以前読んだファイルを再取得する必要はない</li>
+</ol>
+<h3 id="承認フロー">承認フロー</h3>
+<p>PRが作成された場合、状態はWAITING_APPROVALになる。ユーザーがスレッドで
+<code>/agent approve</code> と入力すると、Ingress Lambdaの
+<code>handleApprove</code> が <code>thread_id-index</code>
+GSIでWAITING_APPROVAL状態のジョブを特定し、 <code>ApproveJob</code>
+を呼んでDONEに遷移する。この操作はLambda側で完結し、ECSタスクの起動は不要。</p>
+<h2 id="llmクライアント">LLMクライアント</h2>
+<h3 id="インターフェース設計">インターフェース設計</h3>
+<pre class="go"><code>type Client interface {
+    SendMessage(ctx context.Context, systemPrompt string, messages []Message, opts *SendOptions) (*Response, error)
+}
+
+type Response struct {
+    Content    string          // テキスト応答（tool_use時は空）
+    ToolCalls  []ToolCall      // tool_useブロック群
+    RawContent json.RawMessage // Claude APIのcontent配列をそのまま保持
+    Usage      Usage
+}</code></pre>
+<p><code>RawContent</code> はClaude APIの <code>content</code>
+配列をそのまま保持する。会話履歴として次のリクエストに渡す際、<code>AssistantMessage()</code>
+で <code>Role: "assistant", Content: RawContent</code>
+のメッセージを生成する。これにより、text +
+tool_useが混在するレスポンスも正確に再現できる。</p>
+<h3 id="claude-api実装">Claude API実装</h3>
+<p>デフォルトモデルは
+<code>claude-sonnet-4-6</code>、デフォルトMaxTokensは16,384、HTTPタイムアウトは5分。</p>
+<h3 id="リトライとレート制限">リトライとレート制限</h3>
+<p>リトライ対象はHTTP 429（Rate
+Limit）と529（Overloaded）のみ。それ以外のエラー（400, 401,
+500等）は即座に返す。</p>
+<p>バックオフは <code>retry-after</code>
+ヘッダがあればその値を使い、なければ <code>1000ms * 2^attempt</code>
+の指数バックオフ。</p>
+<p>プロアクティブなレート制限回避が特徴的な実装で、成功レスポンス（200）のヘッダからも残りトークン/リクエスト数を読み取る。入力トークン・出力トークン・リクエスト数の3種類のレート制限ヘッダをチェックし、残りトークンが1000未満、または残りリクエスト数が2未満の場合、リセット時刻まで待機してからレスポンスを返す。これにより次のAPIコールが429を踏む確率を下げる。</p>
+<p><code>stop_reason=max_tokens</code>
+の場合はエラーとして返す。tool_useレスポンスのJSONが途中で切れている可能性があり、不完全なJSONをパースしようとするとデータ破損につながるため。</p>
+<h2 id="executor-成果物の配信">Executor: 成果物の配信</h2>
+<p>Executorは <code>AgentResponse.Type</code>
+に応じて成果物を配信する。</p>
+<h3 id="code-既存リポジトリへのpr">code: 既存リポジトリへのPR</h3>
+<p>ブランチ名は <code>nemuri/{job_idの先頭8文字}</code>
+の形式。コミットメッセージは
+<code>feat: {PRタイトル}\n\nGenerated by Nemuri (job: {job_id})</code>
+の形式。GitHub APIのgit data
+APIでファイルをコミットし、PRを作成する。レビュー結果があればS3にアーティファクトとして保存する。</p>
+<h3 id="new_repo-新規リポジトリ-pr">new_repo: 新規リポジトリ + PR</h3>
+<p><code>CreateRepo</code>
+でプライベートリポジトリを作成し、<code>WaitForRepoReady</code>（デフォルトブランチの準備完了をポーリング）を待ってからPRを作成する。ブランチ作成・コミット・PR作成のいずれかが失敗した場合、<code>DeleteRepo</code>
+でロールバックする。</p>
+<h3 id="file-s3アップロード">file: S3アップロード</h3>
+<p>ファイルをS3の <code>outputs/{job_id}/{filename}</code>
+にアップロードし、24時間有効のプリサインドURLを生成してDiscordに送信する。</p>
+<h3 id="text-discordメッセージ">text: Discordメッセージ</h3>
+<p>テキストをDiscordに直接送信する。2000文字（Discordのメッセージ上限）を超える場合は切り詰められる。</p>
+<p>Discord
+APIのバージョンはv10を使用。まずインタラクションWebhook（<code>SendFollowUp</code>、15分以内有効）で送信を試み、期限切れの場合はBot
+token（<code>SendChannelMessage</code>）にフォールバックする。</p>
+<h2 id="セキュリティ設計">セキュリティ設計</h2>
+<h3 id="llmに渡すツールの制限">LLMに渡すツールの制限</h3>
+<p>エージェントに外部サービスへの直接的な書き込み権限を持つツールは渡していない。Gatheringフェーズではリポジトリの読み取りのみ、Generating/Rewriteフェーズでは成果物のJSON宣言のみを行い、実際の書き込み（PR作成、S3アップロード等）はAgent
+Engine側で制御する。</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>フェーズ</th>
+<th>利用可能ツール</th>
+<th>ToolChoice</th>
+<th>MaxTokens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gathering</td>
+<td><code>list_repo_files</code>, <code>read_repo_file</code>,
+<code>ask_user_question</code></td>
+<td>auto</td>
+<td>min(残予算, 16384)</td>
+</tr>
+<tr>
+<td>Generating</td>
+<td><code>deliver_result</code></td>
+<td>tool（強制）</td>
+<td>16384</td>
+</tr>
+<tr>
+<td>Review</td>
+<td><code>submit_review</code></td>
+<td>tool（強制）</td>
+<td>8192</td>
+</tr>
+<tr>
+<td>Rewrite</td>
+<td><code>deliver_result</code></td>
+<td>tool（強制）</td>
+<td>16384</td>
+</tr>
+</tbody>
+</table>
+<pre class="mermaid"><code>graph LR
+  subgraph &quot;LLMの操作範囲&quot;
+    LLM[Claude API]
+  end
+
+  subgraph &quot;Agent Engineの操作範囲&quot;
+    Engine[Agent Engine]
+    GitHub[GitHub API]
+    S3[S3]
+    DiscordAPI[Discord API]
+  end
+
+  LLM --&gt;|&quot;deliver_result (JSON)&quot;| Engine
+  Engine --&gt;|commit + PR| GitHub
+  Engine --&gt;|PutObject| S3
+  Engine --&gt;|メッセージ送信| DiscordAPI</code></pre>
+<p>LLMの出力は「何を作るか」の宣言（JSON）であり、実際の書き込みはAgent
+Engineが制御する。プロンプトインジェクション等でLLMの出力が汚染されても、実行可能な操作は
+<code>deliver_result</code> のスキーマに制約される。</p>
+<h3 id="開発時のclaude-code利用">開発時のClaude Code利用</h3>
+<p>開発にClaude Codeを初めて使用したが、セキュリティには気を配った。</p>
+<ul>
+<li><strong>開発用コンテナとClaude実行用コンテナを分離</strong>:
+最終的にはClaude Codeが触れるファイルスコープを制限し、<code>.env</code>
+やクレデンシャルファイルを隠蔽した</li>
+<li><strong>生成コードの手動レビュー</strong>:
+特にIAMポリシー、DynamoDBの条件式、セキュリティグループのルールは権限の過剰付与やロジック漏れがないか確認した</li>
+</ul>
+<h3 id="インフラ面">インフラ面</h3>
+<ul>
+<li>シークレットはすべてAWS Secrets
+Managerに格納。ECSの環境変数にはシークレット名のみ渡す</li>
+<li>DynamoDBの条件付き書き込みにより、状態遷移の不整合を防止</li>
+<li>コンテナは <code>nobody:nogroup</code> で実行（非root）</li>
+<li>S3バケットはパブリックアクセスをブロック、AES256サーバーサイド暗号化を有効化</li>
+<li>S3のパス生成にはサニタイズ処理（パストラバーサル防止）</li>
+</ul>
+<h2 id="コンテナ設計">コンテナ設計</h2>
+<p>マルチステージビルドで3段構成にしている。</p>
+<pre class="dockerfile"><code># Stage 1: Goバイナリのビルド
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags=&quot;-s -w&quot; -o agent-engine ./cmd/agent-engine
+
+# Stage 2: wkhtmltopdfのダウンロード（キャッシュ分離）
+FROM debian:12-slim AS wkhtmltopdf
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends ca-certificates wget &amp;&amp; \
+    wget -q -O /tmp/wkhtmltox.deb \
+      https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.bookworm_amd64.deb
+
+# Stage 3: ランタイム
+FROM debian:12-slim
+COPY --from=wkhtmltopdf /tmp/wkhtmltox.deb /tmp/wkhtmltox.deb
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends \
+      ca-certificates fonts-noto-cjk fontconfig \
+      libxrender1 libxext6 libx11-6 libjpeg62-turbo libpng16-16 \
+      /tmp/wkhtmltox.deb &amp;&amp; \
+    rm /tmp/wkhtmltox.deb &amp;&amp; rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /app/agent-engine .
+USER nobody:nogroup
+ENTRYPOINT [&quot;/app/agent-engine&quot;]</code></pre>
+<p>wkhtmltopdfのダウンロードをStage
+2に分離しているのは、<code>.deb</code>
+ファイルのキャッシュをランタイム依存関係のインストールと独立させるため。wkhtmltopdf自体はアーカイブ済みプロジェクトなので、将来的にはWeasyPrintやPlaywrightへの移行を検討している。</p>
+<p>ベースイメージが
+<code>debian:12-slim</code>（Alpineでなく）なのは、wkhtmltopdfがglibcとX11系の共有ライブラリを必要とするため。日本語フォント（fonts-noto-cjk）もインストールしている。Markdown
+→ PDF変換の内部ではgoldmark（GFM +
+Typographer拡張）でHTMLに変換し、wkhtmltopdf（<code>--page-size A4</code>,
+<code>--disable-javascript</code>,
+<code>--disable-local-file-access</code>）でPDF化する。入力サイズ上限は2MiB、実行タイムアウトは60秒。</p>
+<h2 id="開発プロセス">開発プロセス</h2>
+<h3 id="フェーズの段階的実装">8フェーズの段階的実装</h3>
+<p>各フェーズでインフラ（Terraform）とアプリケーション（Go）を同時に進め、動作確認してから次に進めた。</p>
+<table>
+<colgroup>
+<col style="width: 24%" />
+<col style="width: 20%" />
+<col style="width: 37%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>Phase</th>
+<th>内容</th>
+<th>Terraform</th>
+<th>Go</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>Discord受付</td>
+<td>API Gateway, Lambda, SQS</td>
+<td>lambda-ingress: 署名検証, SQSエンキュー</td>
+</tr>
+<tr>
+<td>1</td>
+<td>ECS実行基盤</td>
+<td>VPC, ECS, ECR, Lambda Runner</td>
+<td>lambda-runner: RunTask呼び出し</td>
+</tr>
+<tr>
+<td>2</td>
+<td>状態管理</td>
+<td>DynamoDB</td>
+<td>state: ステートマシン, ロック, ハートビート</td>
+</tr>
+<tr>
+<td>3</td>
+<td>LLM統合</td>
+<td>Secrets Manager</td>
+<td>llm: Claude API, リトライ, レート制限</td>
+</tr>
+<tr>
+<td>4</td>
+<td>エージェントループ</td>
+<td>―</td>
+<td>agent: 2フェーズ設計</td>
+</tr>
+<tr>
+<td>5</td>
+<td>GitHub連携</td>
+<td>―</td>
+<td>github: PR作成, ブランチ管理</td>
+</tr>
+<tr>
+<td>6</td>
+<td>S3/ファイル配信</td>
+<td>S3</td>
+<td>storage: アップロード, プリサインドURL</td>
+</tr>
+<tr>
+<td>7</td>
+<td>レビューループ</td>
+<td>―</td>
+<td>agent: Review → Rewrite サイクル</td>
+</tr>
+<tr>
+<td>8</td>
+<td>ユーザーインタラクション</td>
+<td>―</td>
+<td>executor: 質問/回答, 会話永続化, 承認</td>
+</tr>
+</tbody>
+</table>
+<h3 id="claude-codeの活用">Claude Codeの活用</h3>
+<p>Claude Codeは特にTerraformのモジュール構成、DynamoDBの条件式、AWS
+SDKのボイラープレートで効果が大きかった。「正しく書けるが記述量が多い」タイプのコードとの相性がいい。セキュリティ面の対策は「セキュリティ設計」セクションに記載した。</p>
+<h2 id="設計判断">設計判断</h2>
+<h3 id="github-app-vs-fine-grained-pat">GitHub App vs Fine-grained
+PAT</h3>
+<p>GitHub
+Appの方がInstallation単位でスコープを細かく制御できるが、個人利用前提のためFine-grained
+PATを選択した。App ID、Installation
+ID、秘密鍵の管理が不要になり、実装がシンプルになる。</p>
+<h3 id="claude-api直接呼び出し-vs-claude-cli-agent-sdk">Claude
+API直接呼び出し vs Claude CLI / Agent SDK</h3>
+<p>Agent EngineはClaude
+APIを直接HTTPで叩いている。CLIやSDKの方がプロンプト設計やコンテキスト管理が成熟しており、同じモデルでもより高品質な出力が期待できる。</p>
+<p>理由はセキュリティに尽きる。CLIはbash実行・ファイル書き込み・任意のHTTP通信が可能であり、LLMの出力が意図しない操作を引き起こすリスクがある。プロンプトインジェクション（第三者リポジトリの悪意あるファイル内容経由等）だけでなく、LLMのハルシネーションによって意図しないbashコマンドが実行される可能性もゼロではない。最終出力をプロンプトやMCPツールで構造化させることは可能だが、処理の過程でbashやファイル操作が実行されることは防げない。現設計ではLLMの出力を
+<code>deliver_result</code>
+のJSONスキーマに制約し、実際の書き込み（GitHub
+push、S3アップロード等）はAgent
+Engineが制御する。LLMが何を出力してもスキーマに沿った操作しか実行されないこのサンドボックスモデルが、APIを直接叩く唯一の本質的な理由である。</p>
+<p>トレードオフとして、CLIが持つ洗練されたプロンプト設計やコンテキスト圧縮を自前で再実装する必要があり、その品質はCLIに及ばない。2フェーズ設計やトークン予算管理、<code>fileCache</code>
+によるコンテキスト復元は、この制約の中での近似的な対処である。</p>
+<h3 id="dynamodb-vs-rds">DynamoDB vs RDS</h3>
+<p>ジョブ管理にRDSを使う選択肢もあったが、RDSは最小構成でも常時稼働が必要で、「常時起動するインフラを持たない」原則に反する。Aurora
+Serverless
+v2でもスケールダウンの下限がある。DynamoDBはPAY_PER_REQUESTでゼロリクエスト時のコストがほぼゼロで、条件付き書き込みで分散ロックも実現できる。ジョブ間のリレーションが不要な単純なキーバリュー構造なので、RDBのメリットも薄い。</p>
+<h3 id="s3の用途分離">S3の用途分離</h3>
+<p>S3は以下の2つのプレフィックスで用途を分離している。</p>
+<ul>
+<li><code>artifacts/{job_id}/</code>:
+中間成果物。会話コンテキスト（<code>conversation_context.json</code>）、レビュー結果（<code>review_result.json</code>）、コードレスポンスJSON。ライフサイクルルールで自動削除</li>
+<li><code>outputs/{job_id}/</code>:
+最終成果物。ユーザーに配信するファイル。プリサインドURL（<code>presignExpiry = 24 * time.Hour</code>）で配信。ライフサイクルルールで自動削除</li>
+</ul>
+<p>コード成果物はGitHub
+PRとして配信するため、S3には保存しない。DynamoDBに状態、S3に成果物、GitHubにコードという分離により、それぞれのストレージの特性に合った使い方をしている。</p>
+<h2 id="今後の展望">今後の展望</h2>
+<ul>
+<li><strong>マルチモデルレビュー</strong>:
+生成と異なるモデルでレビューし、自己評価のバイアスを軽減する</li>
+<li><strong>ハートビート監視Lambda</strong>:
+一定時間ハートビートが来ないジョブを検出してFAILEDに遷移させるモニタリング機構</li>
+<li><strong>ユーザープロファイル</strong>:
+コードスタイルの好み、頻用リポジトリ、組織固有のルールを学習</li>
+</ul>
+<h2 id="まとめ">まとめ</h2>
+<p>Discordから自然言語の指示を出すとGitHub
+PRが返ってくるエージェントシステムを実装した。技術的なポイントをまとめる。</p>
+<ul>
+<li><strong>2フェーズエージェントループ</strong>:
+Gathering（リポジトリ読み取り＋ユーザー対話で情報収集）→
+Generating（deliver_resultで成果物宣言）で、LLMの操作範囲を制御しつつ柔軟な成果物生成を実現</li>
+<li><strong>DynamoDBによる排他制御</strong>:
+条件付き書き込みでロック取得、ハートビートでの生存確認、versionとworker_idの分離による楽観的ロック。ハートビートでversionを変更しないことで遷移との競合を回避</li>
+<li><strong>会話コンテキストの永続化</strong>:
+S3に会話履歴・フェーズ・ファイルキャッシュを保存し、ECSタスクをまたいで質問→回答の継続を実現</li>
+<li><strong>レビューループの収束制御</strong>:
+スコア閾値、改善幅、同一指摘の繰り返し、minorのみの判定、アクション可能な指摘がない場合のスキップという5つの打ち切り/スキップ条件</li>
+<li><strong>プロアクティブなレート制限回避</strong>:
+成功レスポンスのヘッダから残り枠を読み取り、枯渇前に待機</li>
+</ul>
+<p>エージェントシステムにおいて重要なのは、LLMに渡すツールの設計である。LLMには外部サービスへの直接的な書き込み権限を持つツールを渡さず、実際の書き込みはアプリケーション側で制御する。LLMの出力は「宣言」であり、「実行」はAgent
+Engineが担う。この分離がセキュリティと柔軟性の両立を可能にする。</p>
+
+</article>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"
+  integrity="sha384-ZM8fDxYm+GXOWeJcxDetoRImNnEAS7XwVFH5kv0pT6RXNy92Nemw/Sj7NfciXpqg"
+  crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js"
+  integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q"
+  crossorigin="anonymous"></script>
+<script>
+document.querySelectorAll('pre[class] > code').forEach(function(code) {
+  var pre = code.parentElement;
+  var lang = pre.className;
+  if (!lang) return;
+  if (lang === 'mermaid') {
+    pre.textContent = code.textContent;
+    pre.className = 'mermaid';
+    return;
+  }
+  code.className = 'language-' + lang;
+  pre.className = '';
+  Prism.highlightElement(code);
+});
+document.querySelectorAll('pre > code[class*="language-"]').forEach(function(code) {
+  var pre = code.parentElement;
+  var btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.textContent = 'copy';
+  btn.addEventListener('click', function() {
+    navigator.clipboard.writeText(code.textContent);
+    btn.textContent = 'copied!';
+    setTimeout(function() { btn.textContent = 'copy'; }, 2000);
+  });
+  pre.appendChild(btn);
+});
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
+  integrity="sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I"
+  crossorigin="anonymous"></script>
+<script>mermaid.initialize({ startOnLoad: true });</script>
+</body>
+</html>
