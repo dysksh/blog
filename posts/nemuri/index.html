@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>自然言語でタスクを投げるとPRが返ってくるエージェントシステム「Nemuri」開発ログ</title>
+<title>エージェントシステム「Nemuri」開発ログ</title>
 <link rel="canonical" href="https://dysksh.github.io/blog/posts/nemuri/">
 <link rel="stylesheet" href="/blog/style.css">
 <link rel="alternate" type="application/rss+xml" title="RSS" href="/blog/rss.xml">
@@ -14,15 +14,18 @@
 <main>
 <article>
 <header>
-<h1>自然言語でタスクを投げるとPRが返ってくるエージェントシステム「Nemuri」開発ログ</h1>
+<h1>エージェントシステム「Nemuri」開発ログ</h1>
 <time datetime="2026-03-18">2026-03-18</time>
-<div class="tags"><a href="/blog/tags/Go/">Go</a> <a href="/blog/tags/AWS/">AWS</a> <a href="/blog/tags/LLM/">LLM</a> <a href="/blog/tags/Claude/">Claude</a> <a href="/blog/tags/Discord/">Discord</a> <a href="/blog/tags/Agent/">Agent</a> <a href="/blog/tags/個人開発/">個人開発</a> <a href="/blog/tags/ECS Fargate/">ECS Fargate</a> <a href="/blog/tags/Lambda/">Lambda</a> <a href="/blog/tags/SQS/">SQS</a> <a href="/blog/tags/DynamoDB/">DynamoDB</a> <a href="/blog/tags/S3/">S3</a> <a href="/blog/tags/API Gateway/">API Gateway</a> <a href="/blog/tags/ECR/">ECR</a> <a href="/blog/tags/VPC/">VPC</a> <a href="/blog/tags/Secrets Manager/">Secrets Manager</a> <a href="/blog/tags/CloudWatch/">CloudWatch</a> <a href="/blog/tags/Terraform/">Terraform</a></div>
+<span class="updated">updated: 2026-03-19</span>
+<div class="tags"><a href="/blog/tags/Go/">Go</a> <a href="/blog/tags/AWS/">AWS</a> <a href="/blog/tags/LLM/">LLM</a> <a href="/blog/tags/Claude/">Claude</a> <a href="/blog/tags/Discord/">Discord</a> <a href="/blog/tags/Agent/">Agent</a> <a href="/blog/tags/個人開発/">個人開発</a> <a href="/blog/tags/ECS Fargate/">ECS Fargate</a> <a href="/blog/tags/Lambda/">Lambda</a> <a href="/blog/tags/DynamoDB/">DynamoDB</a> <a href="/blog/tags/Terraform/">Terraform</a></div>
 </header>
 <h2 id="はじめに">はじめに</h2>
 <p>Nemuriは、Discordのスラッシュコマンドで自然言語のタスクを送ると、LLMエージェントがリポジトリを読み込み、コードを生成し、GitHub
 PRとして返すシステムである。PRに限らず、S3へのファイルアップロードやDiscordへのテキスト返信にも対応している。</p>
-<p>開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人開発になった。開発にはClaude
+<p>開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人プロジェクトになった。開発にはClaude
 Codeを初めて使用した。この記事ではNemuriのアーキテクチャ、実装の詳細、設計判断について書く。</p>
+<p>リポジトリ: <a
+href="https://github.com/dysksh/nemuri">https://github.com/dysksh/nemuri</a></p>
 <h2 id="技術スタック">技術スタック</h2>
 <table>
 <colgroup>
@@ -87,10 +90,6 @@ Codeを初めて使用した。この記事ではNemuriのアーキテクチャ�
 <tr>
 <td>PDF変換</td>
 <td>goldmark + wkhtmltopdf</td>
-</tr>
-<tr>
-<td>主要依存</td>
-<td>aws-sdk-go-v2、aws-lambda-go、google/uuid、yuin/goldmark</td>
 </tr>
 </tbody>
 </table>
@@ -181,7 +180,7 @@ lambda_runner の順で作成する。</p>
 <h3 id="ネットワーク設計">ネットワーク設計</h3>
 <p>VPCにパブリックサブネットを配置し、ECSタスクにパブリックIPを割り当てる。NATゲートウェイは使わない（常時課金を避けるため）。</p>
 <p>セキュリティグループはegressをTCP
-443（HTTPS）のみに制限している。フォワードプロキシ（Squid等）によるドメイン制限も検討したが、個人開発の規模に対してコストと運用負荷が見合わないため見送った。</p>
+443（HTTPS）のみに制限している。ドメインレベルのフィルタリングについては「設計判断」セクションで述べる。</p>
 <h3 id="ecsタスク定義">ECSタスク定義</h3>
 <p>タスク定義では7つの環境変数をコンテナに渡す。シークレットの実値ではなく、Secrets
 Managerのシークレット名を渡す点がポイントである。</p>
@@ -227,7 +226,7 @@ API応答待ちを考慮）</li>
 <li><strong>DynamoDB</strong>:
 PAY_PER_REQUEST。TTL（<code>ttl</code>属性）で自動削除</li>
 <li><strong>S3</strong>: ライフサイクルルールでartifacts /
-outputsを自動削除（日数は変数化）。アウトプットはプリサインドURL（24時間有効）で配信</li>
+outputsを自動削除（日数は変数化）。アウトプットは署名付きURL（24時間有効）で配信</li>
 <li><strong>SQS</strong>: 標準キュー +
 DLQ（14日保持）。メインキュー保持期間は1日</li>
 </ul>
@@ -382,7 +381,7 @@ ask_user_questionのプレースホルダー）を1つのuserメッセージに�
 response.”）は、resume時にユーザー回答で置換される。</p>
 <h3 id="phase-2-generating">Phase 2: Generating</h3>
 <p>Gatheringの結果を新しいコンテキストに詰め込み、単一のLLMコールで成果物を生成する。GatheringフェーズとはMaxTokensの予算が独立している。</p>
-<pre class="go"><code>const generatingMaxTokens = 16384  // Gatheringの累積予算(32768)とは独立
+<pre class="go"><code>const generatingMaxTokens = 32768  // Gatheringの累積予算(32768)とは独立
 
 func (a *Agent) generatingPhase(ctx context.Context, prompt string, gathering *gatheringResult) (*RunResult, error) {
     contextMsg := buildGeneratingContext(prompt, gathering.summary, gathering.fileCache, gathering.messages)
@@ -484,8 +483,7 @@ type ReviewIssue struct {
   RUNNING --&gt; WAITING_USER_INPUT: Agent Engine&lt;br&gt;質問あり(MarkWaitingUserInput)
   RUNNING --&gt; WAITING_APPROVAL: Agent Engine&lt;br&gt;PR作成済み(MarkWaitingApproval)
   WAITING_USER_INPUT --&gt; RUNNING: Agent Engine&lt;br&gt;ユーザー回答後(AcquireLock)
-  WAITING_APPROVAL --&gt; DONE: Ingress Lambda&lt;br&gt;承認(ApproveJob)
-  FAILED --&gt; RUNNING: Agent Engine&lt;br&gt;リトライ(AcquireLock)</code></pre>
+  WAITING_APPROVAL --&gt; DONE: Ingress Lambda&lt;br&gt;承認(ApproveJob)</code></pre>
 <p><code>allowedTransitions</code>
 マップによる遷移検証と、<code>AcquireLock</code>
 のConditionExpressionによる遷移は別の仕組みである。<code>ValidateTransition</code>
@@ -495,16 +493,15 @@ type ReviewIssue struct {
 の各メソッド内で呼ばれる。一方、<code>AcquireLock</code> は
 <code>ValidateTransition</code>
 を経由せず、DynamoDBのConditionExpressionで直接
-<code>state IN (INIT, FAILED, WAITING_USER_INPUT)</code>
+<code>state IN (INIT, WAITING_USER_INPUT)</code>
 を検査してRUNNINGに遷移する。つまり
-<code>INIT → RUNNING</code>、<code>FAILED → RUNNING</code>、<code>WAITING_USER_INPUT → RUNNING</code>
-の3つはすべて <code>AcquireLock</code>
-のConditionExpressionが担っている。</p>
+<code>INIT → RUNNING</code>、<code>WAITING_USER_INPUT → RUNNING</code>
+の2つは <code>AcquireLock</code> のConditionExpressionが担っている。</p>
 <pre class="go"><code>var allowedTransitions = map[JobState][]JobState{
     StateInit:             {StateRunning},
     StateRunning:          {StateWaitingUserInput, StateWaitingApproval, StateDone, StateFailed},
     StateWaitingUserInput: {StateRunning},
-    StateWaitingApproval:  {StateDone, StateFailed},
+    StateWaitingApproval:  {StateDone},
 }</code></pre>
 <h3 id="dynamodbのジョブレコード">DynamoDBのジョブレコード</h3>
 <pre class="go"><code>type Job struct {
@@ -562,7 +559,7 @@ Write）で排他制御を実現する。</p>
             &quot;updated_at = :now, version = version + :one&quot;),
         ConditionExpression: aws.String(
             // :waiting = WAITING_USER_INPUT
-            &quot;(#state IN (:init, :failed, :waiting)) AND &quot; +
+            &quot;(#state IN (:init, :waiting)) AND &quot; +
             &quot;(attribute_not_exists(worker_id) OR worker_id = :empty OR heartbeat_at &lt; :expired)&quot;),
         // ...
     })
@@ -571,8 +568,8 @@ Write）で排他制御を実現する。</p>
 <p>ロック取得の条件は2つの論理ANDで構成される。</p>
 <ol type="1">
 <li><strong>state条件</strong>:
-<code>INIT</code>、<code>FAILED</code>、<code>WAITING_USER_INPUT</code>
-のいずれか。<code>RUNNING</code>、<code>DONE</code>、<code>WAITING_APPROVAL</code>
+<code>INIT</code>、<code>WAITING_USER_INPUT</code>
+のいずれか。<code>RUNNING</code>、<code>DONE</code>、<code>WAITING_APPROVAL</code>、<code>FAILED</code>
 のジョブはロック取得できない</li>
 <li><strong>worker条件</strong>: <code>worker_id</code>
 が未設定（<code>attribute_not_exists</code>）、空文字、または
@@ -745,7 +742,7 @@ APIでファイルをコミットし、PRを作成する。レビュー結果が
 でロールバックする。</p>
 <h3 id="file-s3アップロード">file: S3アップロード</h3>
 <p>ファイルをS3の <code>outputs/{job_id}/{filename}</code>
-にアップロードし、24時間有効のプリサインドURLを生成してDiscordに送信する。</p>
+にアップロードし、24時間有効の署名付きURLを生成してDiscordに送信する。</p>
 <h3 id="text-discordメッセージ">text: Discordメッセージ</h3>
 <p>テキストをDiscordに直接送信する。2000文字（Discordのメッセージ上限）を超える場合は切り詰められる。</p>
 <p>Discord
@@ -782,7 +779,7 @@ Engine側で制御する。</p>
 <td>Generating</td>
 <td><code>deliver_result</code></td>
 <td>tool（強制）</td>
-<td>16384</td>
+<td>32768</td>
 </tr>
 <tr>
 <td>Review</td>
@@ -931,7 +928,7 @@ Typographer拡張）でHTMLに変換し、wkhtmltopdf（<code>--page-size A4</co
 <td>6</td>
 <td>S3/ファイル配信</td>
 <td>S3</td>
-<td>storage: アップロード, プリサインドURL</td>
+<td>storage: アップロード, 署名付きURL</td>
 </tr>
 <tr>
 <td>7</td>
@@ -978,10 +975,50 @@ v2でもスケールダウンの下限がある。DynamoDBはPAY_PER_REQUESTで�
 <li><code>artifacts/{job_id}/</code>:
 中間成果物。会話コンテキスト（<code>conversation_context.json</code>）、レビュー結果（<code>review_result.json</code>）、コードレスポンスJSON。ライフサイクルルールで自動削除</li>
 <li><code>outputs/{job_id}/</code>:
-最終成果物。ユーザーに配信するファイル。プリサインドURL（<code>presignExpiry = 24 * time.Hour</code>）で配信。ライフサイクルルールで自動削除</li>
+最終成果物。ユーザーに配信するファイル。署名付きURL（<code>presignExpiry = 24 * time.Hour</code>）で配信。ライフサイクルルールで自動削除</li>
 </ul>
 <p>コード成果物はGitHub
 PRとして配信するため、S3には保存しない。DynamoDBに状態、S3に成果物、GitHubにコードという分離により、それぞれのストレージの特性に合った使い方をしている。</p>
+<h3 id="ジョブ-1-ecsタスク-vs-常駐サービス">1ジョブ = 1 ECSタスク vs
+常駐サービス</h3>
+<p>ECS
+Serviceとして常駐させてキューをポーリングする方式も考えられるが、1ジョブ
+= 1
+ECSタスク（one-shot）を選択した。ジョブがない時間帯のコストがゼロになる、タスク間でメモリリークが蓄積しない、SQSキュー深度による自然なスケーリングが得られる、といったメリットがある。デメリットはECSタスク起動のコールドスタート（数十秒）だが、ジョブの実行時間自体が数分単位のため、相対的に許容範囲である。</p>
+<h3
+id="discordスラッシュコマンド-vs-mentionメッセージ監視">Discordスラッシュコマンド
+vs <span class="citation"
+data-cites="mentionメッセージ監視">@mentionメッセージ監視</span></h3>
+<p><span class="citation"
+data-cites="mentionベースのメッセージ監視はDiscord">@mentionベースのメッセージ監視はDiscord</span>
+Gateway（WebSocket常時接続）が必要で、常時稼働するBotプロセスが必要になる。これは「常時起動するインフラを持たない」原則に反する。スラッシュコマンドはHTTPエンドポイント（API
+Gateway +
+Lambda）で受けられるため、サーバーレスアーキテクチャと整合する。UXとしても、スラッシュコマンドの引数に自然言語を渡す形で十分である。</p>
+<h3 id="go言語の選定">Go言語の選定</h3>
+<p>著者がGoに慣れていることが最大の理由。加えて、goroutineによるハートビートの並行管理、シングルバイナリによる小さいコンテナイメージ、成熟したAWS
+SDK（aws-sdk-go-v2）がこのユースケースに適している。ワークロードはI/Oバウンド（LLM
+API呼び出し待ち）のため、Pythonでも性能上の問題はないが、型安全性とシングルバイナリデプロイの利点からGoを選択した。</p>
+<h3 id="フェーズ設計gathering-generating">2フェーズ設計（Gathering →
+Generating）</h3>
+<p>1回のLLMコールで情報収集と成果物生成を同時に行うと、コンテキストウィンドウが膨張してコストが増大し、途中で
+max_tokens
+に達して出力が途切れるリスクがある。Gatheringフェーズでリポジトリを読み込み、テキストサマリと
+fileCache
+に集約してから、Generatingフェーズで新しいコンテキストに詰め込んで生成することで、不要なツールコール履歴を省いたコンパクトなコンテキストで成果物を生成できる。</p>
+<h3 id="自前の状態管理-vs-エージェントフレームワーク">自前の状態管理 vs
+エージェントフレームワーク</h3>
+<p>Agent
+Engineの状態遷移は6状態・固定遷移であり、エージェントフレームワークが提供するグラフ構造や条件分岐の表現力は不要。また、Goにはこの規模に適したエージェントフレームワークが成熟していない。フレームワークの抽象化はAWSサービスとの統合（DynamoDB条件付き書き込み、S3アーティファクト管理等）を隠蔽し、デバッグや最適化を困難にする。状態管理のコード量自体が少ないため、フレームワーク導入のメリットよりも、直接DynamoDBを操作する透明性を優先した。</p>
+<h3 id="ポート443制限-vs-ドメインレベルフィルタリング">ポート443制限 vs
+ドメインレベルフィルタリング</h3>
+<p>ECSタスクのセキュリティグループでegressをTCP
+443（HTTPS）のみに制限している。Squidプロキシによるドメインフィルタリングも検討したが、最小構成でも月$34程度（EC2
++ VPC Interface
+Endpoints）の常時稼働コストが発生する。個人利用の規模に対してコストと運用負荷が見合わないため見送った。</p>
+<p>アプリケーション層では、LLMに汎用的なHTTPクライアントツールを渡していないため、実際にHTTPSで外部通信できるのはAgent
+Engineがハードコードした宛先（Claude API、GitHub API、Discord
+API、AWSサービス）のみである。ただし、これはアプリケーション層での制限であり、ネットワーク層での防御ではない。依存ライブラリの脆弱性やサプライチェーン攻撃の場合、TCP
+443で任意のホストに到達可能である点は認識している。</p>
 <h2 id="今後の展望">今後の展望</h2>
 <ul>
 <li><strong>マルチモデルレビュー</strong>:
