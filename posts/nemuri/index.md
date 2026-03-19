@@ -1,14 +1,17 @@
 ---
-title: "自然言語でタスクを投げるとPRが返ってくるエージェントシステム「Nemuri」開発ログ"
+title: "エージェントシステム「Nemuri」開発ログ"
 date: 2026-03-18
-tags: [Go, AWS, LLM, Claude, Discord, Agent, 個人開発, ECS Fargate, Lambda, SQS, DynamoDB, S3, API Gateway, ECR, VPC, Secrets Manager, CloudWatch, Terraform]
+updated: 2026-03-19
+tags: [Go, AWS, LLM, Claude, Discord, Agent, 個人開発, ECS Fargate, Lambda, DynamoDB, Terraform]
 ---
 
 ## はじめに
 
 Nemuriは、Discordのスラッシュコマンドで自然言語のタスクを送ると、LLMエージェントがリポジトリを読み込み、コードを生成し、GitHub PRとして返すシステムである。PRに限らず、S3へのファイルアップロードやDiscordへのテキスト返信にも対応している。
 
-開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人開発になった。開発にはClaude Codeを初めて使用した。この記事ではNemuriのアーキテクチャ、実装の詳細、設計判断について書く。
+開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人プロジェクトになった。開発にはClaude Codeを初めて使用した。この記事ではNemuriのアーキテクチャ、実装の詳細、設計判断について書く。
+
+リポジトリ: [https://github.com/dysksh/nemuri](https://github.com/dysksh/nemuri)
 
 ## 技術スタック
 
@@ -27,7 +30,6 @@ Nemuriは、Discordのスラッシュコマンドで自然言語のタスクを�
 | ログ | CloudWatch Logs |
 | IaC | Terraform（モジュール構成、dev/prod環境分離） |
 | PDF変換 | goldmark + wkhtmltopdf |
-| 主要依存 | aws-sdk-go-v2、aws-lambda-go、google/uuid、yuin/goldmark |
 
 ## アーキテクチャ
 
@@ -118,7 +120,7 @@ terraform/
 
 VPCにパブリックサブネットを配置し、ECSタスクにパブリックIPを割り当てる。NATゲートウェイは使わない（常時課金を避けるため）。
 
-セキュリティグループはegressをTCP 443（HTTPS）のみに制限している。フォワードプロキシ（Squid等）によるドメイン制限も検討したが、個人開発の規模に対してコストと運用負荷が見合わないため見送った。
+セキュリティグループはegressをTCP 443（HTTPS）のみに制限している。ドメインレベルのフィルタリングについては「設計判断」セクションで述べる。
 
 ### ECSタスク定義
 
@@ -161,7 +163,7 @@ Agent Engineの起動時にシークレット系はSecrets Managerから実際�
 - **ECS Fargate**: ジョブ実行時間に比例。CPU/メモリは変数化（デフォルト: 0.25 vCPU / 512 MiB）
 - **Lambda**: Ingress（128MB / 10秒タイムアウト）、Runner（128MB / 30秒タイムアウト。RunTask API応答待ちを考慮）
 - **DynamoDB**: PAY_PER_REQUEST。TTL（`ttl`属性）で自動削除
-- **S3**: ライフサイクルルールでartifacts / outputsを自動削除（日数は変数化）。アウトプットはプリサインドURL（24時間有効）で配信
+- **S3**: ライフサイクルルールでartifacts / outputsを自動削除（日数は変数化）。アウトプットは署名付きURL（24時間有効）で配信
 - **SQS**: 標準キュー + DLQ（14日保持）。メインキュー保持期間は1日
 
 ## ソースコード構造
@@ -333,7 +335,7 @@ for _, tc := range resp.ToolCalls {
 Gatheringの結果を新しいコンテキストに詰め込み、単一のLLMコールで成果物を生成する。GatheringフェーズとはMaxTokensの予算が独立している。
 
 ```go
-const generatingMaxTokens = 16384  // Gatheringの累積予算(32768)とは独立
+const generatingMaxTokens = 32768  // Gatheringの累積予算(32768)とは独立
 
 func (a *Agent) generatingPhase(ctx context.Context, prompt string, gathering *gatheringResult) (*RunResult, error) {
     contextMsg := buildGeneratingContext(prompt, gathering.summary, gathering.fileCache, gathering.messages)
@@ -443,17 +445,16 @@ stateDiagram-v2
   RUNNING --> WAITING_APPROVAL: Agent Engine<br>PR作成済み(MarkWaitingApproval)
   WAITING_USER_INPUT --> RUNNING: Agent Engine<br>ユーザー回答後(AcquireLock)
   WAITING_APPROVAL --> DONE: Ingress Lambda<br>承認(ApproveJob)
-  FAILED --> RUNNING: Agent Engine<br>リトライ(AcquireLock)
 ```
 
-`allowedTransitions` マップによる遷移検証と、`AcquireLock` のConditionExpressionによる遷移は別の仕組みである。`ValidateTransition` は `TransitionState`, `MarkDone`, `MarkFailed`, `MarkWaitingUserInput`, `MarkWaitingApproval` の各メソッド内で呼ばれる。一方、`AcquireLock` は `ValidateTransition` を経由せず、DynamoDBのConditionExpressionで直接 `state IN (INIT, FAILED, WAITING_USER_INPUT)` を検査してRUNNINGに遷移する。つまり `INIT → RUNNING`、`FAILED → RUNNING`、`WAITING_USER_INPUT → RUNNING` の3つはすべて `AcquireLock` のConditionExpressionが担っている。
+`allowedTransitions` マップによる遷移検証と、`AcquireLock` のConditionExpressionによる遷移は別の仕組みである。`ValidateTransition` は `TransitionState`, `MarkDone`, `MarkFailed`, `MarkWaitingUserInput`, `MarkWaitingApproval` の各メソッド内で呼ばれる。一方、`AcquireLock` は `ValidateTransition` を経由せず、DynamoDBのConditionExpressionで直接 `state IN (INIT, WAITING_USER_INPUT)` を検査してRUNNINGに遷移する。つまり `INIT → RUNNING`、`WAITING_USER_INPUT → RUNNING` の2つは `AcquireLock` のConditionExpressionが担っている。
 
 ```go
 var allowedTransitions = map[JobState][]JobState{
     StateInit:             {StateRunning},
     StateRunning:          {StateWaitingUserInput, StateWaitingApproval, StateDone, StateFailed},
     StateWaitingUserInput: {StateRunning},
-    StateWaitingApproval:  {StateDone, StateFailed},
+    StateWaitingApproval:  {StateDone},
 }
 ```
 
@@ -512,7 +513,7 @@ func (s *Store) AcquireLock(ctx context.Context, jobID, workerID string) error {
             "updated_at = :now, version = version + :one"),
         ConditionExpression: aws.String(
             // :waiting = WAITING_USER_INPUT
-            "(#state IN (:init, :failed, :waiting)) AND " +
+            "(#state IN (:init, :waiting)) AND " +
             "(attribute_not_exists(worker_id) OR worker_id = :empty OR heartbeat_at < :expired)"),
         // ...
     })
@@ -522,7 +523,7 @@ func (s *Store) AcquireLock(ctx context.Context, jobID, workerID string) error {
 
 ロック取得の条件は2つの論理ANDで構成される。
 
-1. **state条件**: `INIT`、`FAILED`、`WAITING_USER_INPUT` のいずれか。`RUNNING`、`DONE`、`WAITING_APPROVAL` のジョブはロック取得できない
+1. **state条件**: `INIT`、`WAITING_USER_INPUT` のいずれか。`RUNNING`、`DONE`、`WAITING_APPROVAL`、`FAILED` のジョブはロック取得できない
 2. **worker条件**: `worker_id` が未設定（`attribute_not_exists`）、空文字、または `heartbeat_at` が10分以上前（＝前のワーカーが死んだ）
 
 ConditionCheckFailedExceptionが返った場合、別のワーカーが既にロックを取得しているか、ジョブが不正な状態にある。Agent Engineはこのエラーでexit 1する。なお、SQSメッセージはRunner Lambdaの正常終了時にイベントソースマッピングが削除済みのため、SQS経由の自動リトライは発生しない。DynamoDBのジョブレコードはINITまたはRUNNING状態で残るため、手動での再実行は可能である。
@@ -650,7 +651,7 @@ Executorは `AgentResponse.Type` に応じて成果物を配信する。
 
 ### file: S3アップロード
 
-ファイルをS3の `outputs/{job_id}/{filename}` にアップロードし、24時間有効のプリサインドURLを生成してDiscordに送信する。
+ファイルをS3の `outputs/{job_id}/{filename}` にアップロードし、24時間有効の署名付きURLを生成してDiscordに送信する。
 
 ### text: Discordメッセージ
 
@@ -667,7 +668,7 @@ Discord APIのバージョンはv10を使用。まずインタラクションWeb
 | フェーズ | 利用可能ツール | ToolChoice | MaxTokens |
 |---|---|---|---|
 | Gathering | `list_repo_files`, `read_repo_file`, `ask_user_question` | auto | min(残予算, 16384) |
-| Generating | `deliver_result` | tool（強制） | 16384 |
+| Generating | `deliver_result` | tool（強制） | 32768 |
 | Review | `submit_review` | tool（強制） | 8192 |
 | Rewrite | `deliver_result` | tool（強制） | 16384 |
 
@@ -758,7 +759,7 @@ wkhtmltopdfのダウンロードをStage 2に分離しているのは、`.deb` �
 | 3 | LLM統合 | Secrets Manager | llm: Claude API, リトライ, レート制限 |
 | 4 | エージェントループ | ― | agent: 2フェーズ設計 |
 | 5 | GitHub連携 | ― | github: PR作成, ブランチ管理 |
-| 6 | S3/ファイル配信 | S3 | storage: アップロード, プリサインドURL |
+| 6 | S3/ファイル配信 | S3 | storage: アップロード, 署名付きURL |
 | 7 | レビューループ | ― | agent: Review → Rewrite サイクル |
 | 8 | ユーザーインタラクション | ― | executor: 質問/回答, 会話永続化, 承認 |
 
@@ -790,9 +791,35 @@ Agent EngineはClaude APIを直接HTTPで叩いている。CLIやSDKの方がプ
 S3は以下の2つのプレフィックスで用途を分離している。
 
 - `artifacts/{job_id}/`: 中間成果物。会話コンテキスト（`conversation_context.json`）、レビュー結果（`review_result.json`）、コードレスポンスJSON。ライフサイクルルールで自動削除
-- `outputs/{job_id}/`: 最終成果物。ユーザーに配信するファイル。プリサインドURL（`presignExpiry = 24 * time.Hour`）で配信。ライフサイクルルールで自動削除
+- `outputs/{job_id}/`: 最終成果物。ユーザーに配信するファイル。署名付きURL（`presignExpiry = 24 * time.Hour`）で配信。ライフサイクルルールで自動削除
 
 コード成果物はGitHub PRとして配信するため、S3には保存しない。DynamoDBに状態、S3に成果物、GitHubにコードという分離により、それぞれのストレージの特性に合った使い方をしている。
+
+### 1ジョブ = 1 ECSタスク vs 常駐サービス
+
+ECS Serviceとして常駐させてキューをポーリングする方式も考えられるが、1ジョブ = 1 ECSタスク（one-shot）を選択した。ジョブがない時間帯のコストがゼロになる、タスク間でメモリリークが蓄積しない、SQSキュー深度による自然なスケーリングが得られる、といったメリットがある。デメリットはECSタスク起動のコールドスタート（数十秒）だが、ジョブの実行時間自体が数分単位のため、相対的に許容範囲である。
+
+### Discordスラッシュコマンド vs @mentionメッセージ監視
+
+@mentionベースのメッセージ監視はDiscord Gateway（WebSocket常時接続）が必要で、常時稼働するBotプロセスが必要になる。これは「常時起動するインフラを持たない」原則に反する。スラッシュコマンドはHTTPエンドポイント（API Gateway + Lambda）で受けられるため、サーバーレスアーキテクチャと整合する。UXとしても、スラッシュコマンドの引数に自然言語を渡す形で十分である。
+
+### Go言語の選定
+
+著者がGoに慣れていることが最大の理由。加えて、goroutineによるハートビートの並行管理、シングルバイナリによる小さいコンテナイメージ、成熟したAWS SDK（aws-sdk-go-v2）がこのユースケースに適している。ワークロードはI/Oバウンド（LLM API呼び出し待ち）のため、Pythonでも性能上の問題はないが、型安全性とシングルバイナリデプロイの利点からGoを選択した。
+
+### 2フェーズ設計（Gathering → Generating）
+
+1回のLLMコールで情報収集と成果物生成を同時に行うと、コンテキストウィンドウが膨張してコストが増大し、途中で max_tokens に達して出力が途切れるリスクがある。Gatheringフェーズでリポジトリを読み込み、テキストサマリと fileCache に集約してから、Generatingフェーズで新しいコンテキストに詰め込んで生成することで、不要なツールコール履歴を省いたコンパクトなコンテキストで成果物を生成できる。
+
+### 自前の状態管理 vs エージェントフレームワーク
+
+Agent Engineの状態遷移は6状態・固定遷移であり、エージェントフレームワークが提供するグラフ構造や条件分岐の表現力は不要。また、Goにはこの規模に適したエージェントフレームワークが成熟していない。フレームワークの抽象化はAWSサービスとの統合（DynamoDB条件付き書き込み、S3アーティファクト管理等）を隠蔽し、デバッグや最適化を困難にする。状態管理のコード量自体が少ないため、フレームワーク導入のメリットよりも、直接DynamoDBを操作する透明性を優先した。
+
+### ポート443制限 vs ドメインレベルフィルタリング
+
+ECSタスクのセキュリティグループでegressをTCP 443（HTTPS）のみに制限している。Squidプロキシによるドメインフィルタリングも検討したが、最小構成でも月$34程度（EC2 + VPC Interface Endpoints）の常時稼働コストが発生する。個人利用の規模に対してコストと運用負荷が見合わないため見送った。
+
+アプリケーション層では、LLMに汎用的なHTTPクライアントツールを渡していないため、実際にHTTPSで外部通信できるのはAgent Engineがハードコードした宛先（Claude API、GitHub API、Discord API、AWSサービス）のみである。ただし、これはアプリケーション層での制限であり、ネットワーク層での防御ではない。依存ライブラリの脆弱性やサプライチェーン攻撃の場合、TCP 443で任意のホストに到達可能である点は認識している。
 
 ## 今後の展望
 
