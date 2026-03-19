@@ -184,6 +184,21 @@ def write_file(path, content):
 # --- Build steps ---
 
 
+def _externalize_links(html):
+    """Add target="_blank" rel="noopener noreferrer" to external links."""
+    def _replace(m):
+        tag = m.group(0)
+        href_match = re.search(r'href="([^"]*)"', tag)
+        if not href_match:
+            return tag
+        href = href_match.group(1)
+        if href.startswith(("/", "#")) or (SITE_URL and href.startswith(SITE_URL)):
+            return tag
+        return tag[:-1] + ' target="_blank" rel="noopener noreferrer">'
+
+    return re.sub(r"<a\s[^>]*>", _replace, html)
+
+
 def build_post(post):
     """Convert a single post to HTML via Pandoc."""
     result = subprocess.run(
@@ -192,7 +207,7 @@ def build_post(post):
         text=True,
         check=True,
     )
-    body_html = result.stdout
+    body_html = _externalize_links(result.stdout)
     post["body_html"] = body_html
 
     title = escape(post.get("title", ""))
@@ -329,7 +344,8 @@ def build_about_page():
             text=True,
             check=True,
         )
-        content = f"<h1>{escape(title)}</h1>\n{result.stdout}"
+        body_html = _externalize_links(result.stdout)
+        content = f"<h1>{escape(title)}</h1>\n{body_html}"
     else:
         title = "About"
         content = "<h1>About</h1>\n<p>Coming soon.</p>"
