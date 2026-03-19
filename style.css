@@ -47,7 +47,7 @@ blockquote {
 
 img { max-width: 100%; }
 
-table { border-collapse: collapse; }
+table { border-collapse: collapse; display: block; overflow-x: auto; white-space: nowrap; }
 th, td { border: 1px solid #ddd; padding: 0.5rem; }
 
 /* Article header */
@@ -74,10 +74,11 @@ pre {
 
 code { font-family: var(--mono); font-size: 0.9rem; }
 
-p code, li code {
+p code, li code, td code {
   background: #f0f0f0;
   padding: 0.1rem 0.35rem;
   border-radius: 3px;
+  overflow-wrap: break-word;
 }
 
 .copy-btn {
