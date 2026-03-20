@@ -1,7 +1,7 @@
 ---
 title: "エージェントシステム「Nemuri」開発ログ"
 date: 2026-03-18
-updated: 2026-03-19
+updated: 2026-03-20
 tags: [Go, AWS, LLM, Claude, Discord, Agent, 個人開発, ECS Fargate, Lambda, DynamoDB, Terraform]
 ---
 
@@ -9,7 +9,7 @@ tags: [Go, AWS, LLM, Claude, Discord, Agent, 個人開発, ECS Fargate, Lambda, 
 
 Nemuriは、Discordのスラッシュコマンドで自然言語のタスクを送ると、LLMエージェントがリポジトリを読み込み、コードを生成し、GitHub PRとして返すシステムである。PRに限らず、S3へのファイルアップロードやDiscordへのテキスト返信にも対応している。
 
-開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人プロジェクトになった。開発にはClaude Codeを初めて使用した。この記事ではNemuriのアーキテクチャ、実装の詳細、設計判断について書く。
+開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人でシステムを開発した。開発にはClaude Codeを初めて使用した。この記事ではNemuriのアーキテクチャ、実装の詳細、設計判断について書く。
 
 リポジトリ: [https://github.com/dysksh/nemuri](https://github.com/dysksh/nemuri)
 
@@ -83,7 +83,7 @@ graph TB
 
 ### リクエストフロー
 
-1. ユーザーがDiscordで `/agent <プロンプト>` を実行
+1. ユーザーがDiscordで `/nemuri <プロンプト>` を実行
 2. Discord → API Gateway v2（HTTP API）→ Ingress Lambda が起動
 3. Ingress Lambda がEd25519署名を検証し、DynamoDBにジョブレコード（state=INIT）を作成、SQSにエンキュー
 4. Discordにはdeferred ACK（type=5）を3秒以内に返す。Discordのインタラクション応答期限が3秒のため、ジョブ処理は非同期で行う必要がある
@@ -577,7 +577,7 @@ type conversationContext struct {
 
 ### 回答→再開フロー
 
-1. **Ingress Lambda**: ユーザーがスレッドで `/agent <回答>` と入力。スレッド内では `channel_id` にthread IDが入るため、`thread_id-index` GSIでWAITING_USER_INPUT状態のジョブを特定
+1. **Ingress Lambda**: ユーザーがスレッドで `/nemuri <回答>` と入力。スレッド内では `channel_id` にthread IDが入るため、`thread_id-index` GSIでWAITING_USER_INPUT状態のジョブを特定
 2. **Ingress Lambda**: `SetUserResponse` でDynamoDBにユーザー回答と新しい `interaction_token` を保存。SQSにresumeメッセージをエンキュー。Discordにはdeferred ACK（type=5）を返す
 3. **Runner Lambda → ECS**: 新しいECSタスクが起動。`AcquireLock` でWAITING_USER_INPUT → RUNNINGに遷移。`job.UserResponse != ""` でresumeフローと判定
 4. **Executor**: S3から会話コンテキストを復元。プレースホルダーの `tool_result` をユーザー回答で置換
@@ -602,7 +602,7 @@ func (e *Executor) resumeAgent(ctx context.Context, job *state.Job) (*agent.RunR
 
 ### 承認フロー
 
-PRが作成された場合、状態はWAITING_APPROVALになる。ユーザーがスレッドで `/agent approve` と入力すると、Ingress Lambdaの `handleApprove` が `thread_id-index` GSIでWAITING_APPROVAL状態のジョブを特定し、 `ApproveJob` を呼んでDONEに遷移する。この操作はLambda側で完結し、ECSタスクの起動は不要。
+PRが作成された場合、状態はWAITING_APPROVALになる。ユーザーがスレッドで `/nemuri approve` と入力すると、Ingress Lambdaの `handleApprove` が `thread_id-index` GSIでWAITING_APPROVAL状態のジョブを特定し、 `ApproveJob` を呼んでDONEに遷移する。この操作はLambda側で完結し、ECSタスクの起動は不要。
 
 ## LLMクライアント
 
