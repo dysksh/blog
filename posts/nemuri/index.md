@@ -9,7 +9,7 @@ tags: [Go, AWS, LLM, Claude, Discord, Agent, 個人開発, ECS Fargate, Lambda, 
 
 Nemuriは、Discordのスラッシュコマンドで自然言語のタスクを送ると、LLMエージェントがリポジトリを読み込み、コードを生成し、GitHub PRとして返すシステムである。PRに限らず、S3へのファイルアップロードやDiscordへのテキスト返信にも対応している。
 
-開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人でシステムを開発した。開発にはClaude Codeを初めて使用した。この記事ではNemuriのアーキテクチャ、実装の詳細、設計判断について書く。
+開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、本システムを開発した。LLMに何を許し何を許さないかの境界を意識し、運用上の不安が少ない設計を目指している。開発にはClaude Codeを初めて使用した。この記事ではNemuriのアーキテクチャ、実装の詳細、設計判断について書く。
 
 リポジトリ: [https://github.com/dysksh/nemuri](https://github.com/dysksh/nemuri)
 
