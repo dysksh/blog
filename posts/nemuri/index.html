@@ -16,13 +16,13 @@
 <header>
 <h1>エージェントシステム「Nemuri」開発ログ</h1>
 <time datetime="2026-03-18">2026-03-18</time>
-<span class="updated">updated: 2026-03-19</span>
+<span class="updated">updated: 2026-03-20</span>
 <div class="tags"><a href="/blog/tags/Go/">Go</a> <a href="/blog/tags/AWS/">AWS</a> <a href="/blog/tags/LLM/">LLM</a> <a href="/blog/tags/Claude/">Claude</a> <a href="/blog/tags/Discord/">Discord</a> <a href="/blog/tags/Agent/">Agent</a> <a href="/blog/tags/個人開発/">個人開発</a> <a href="/blog/tags/ECS Fargate/">ECS Fargate</a> <a href="/blog/tags/Lambda/">Lambda</a> <a href="/blog/tags/DynamoDB/">DynamoDB</a> <a href="/blog/tags/Terraform/">Terraform</a></div>
 </header>
 <h2 id="はじめに">はじめに</h2>
 <p>Nemuriは、Discordのスラッシュコマンドで自然言語のタスクを送ると、LLMエージェントがリポジトリを読み込み、コードを生成し、GitHub
 PRとして返すシステムである。PRに限らず、S3へのファイルアップロードやDiscordへのテキスト返信にも対応している。</p>
-<p>開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人プロジェクトになった。開発にはClaude
+<p>開発期間は2週間。OpenClawに関する記事を読んで触発されたのがきっかけで、社会人になって初めての個人でシステムを開発した。開発にはClaude
 Codeを初めて使用した。この記事ではNemuriのアーキテクチャ、実装の詳細、設計判断について書く。</p>
 <p>リポジトリ: <a
 href="https://github.com/dysksh/nemuri" target="_blank" rel="noopener noreferrer">https://github.com/dysksh/nemuri</a></p>
@@ -140,7 +140,7 @@ href="https://github.com/dysksh/nemuri" target="_blank" rel="noopener noreferrer
 ECSタスクのワンショット実行で、ジョブがなければAWS費用はほぼゼロになる。長時間起動するサービスは存在しない。</p>
 <h3 id="リクエストフロー">リクエストフロー</h3>
 <ol type="1">
-<li>ユーザーがDiscordで <code>/agent &lt;プロンプト&gt;</code>
+<li>ユーザーがDiscordで <code>/nemuri &lt;プロンプト&gt;</code>
 を実行</li>
 <li>Discord → API Gateway v2（HTTP API）→ Ingress Lambda が起動</li>
 <li>Ingress Lambda
@@ -652,7 +652,7 @@ Lambda成功時に既に削除済み）</li>
 <h3 id="回答再開フロー">回答→再開フロー</h3>
 <ol type="1">
 <li><strong>Ingress Lambda</strong>: ユーザーがスレッドで
-<code>/agent &lt;回答&gt;</code> と入力。スレッド内では
+<code>/nemuri &lt;回答&gt;</code> と入力。スレッド内では
 <code>channel_id</code> にthread
 IDが入るため、<code>thread_id-index</code>
 GSIでWAITING_USER_INPUT状態のジョブを特定</li>
@@ -693,7 +693,7 @@ S3から会話コンテキストを復元。プレースホルダーの
 </ol>
 <h3 id="承認フロー">承認フロー</h3>
 <p>PRが作成された場合、状態はWAITING_APPROVALになる。ユーザーがスレッドで
-<code>/agent approve</code> と入力すると、Ingress Lambdaの
+<code>/nemuri approve</code> と入力すると、Ingress Lambdaの
 <code>handleApprove</code> が <code>thread_id-index</code>
 GSIでWAITING_APPROVAL状態のジョブを特定し、 <code>ApproveJob</code>
 を呼んでDONEに遷移する。この操作はLambda側で完結し、ECSタスクの起動は不要。</p>
